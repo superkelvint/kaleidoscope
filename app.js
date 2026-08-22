@@ -30,6 +30,8 @@ uniform vec2 u_resolution;
 uniform vec2 u_imageResolution;
 uniform float u_segments;
 uniform bool u_mirror;
+uniform int u_symmetryMode;
+uniform float u_twist;
 uniform float u_zoom;
 uniform float u_rotation;
 uniform vec2 u_pan;
@@ -48,22 +50,57 @@ vec2 rotate2d(vec2 p, float a) {
   return mat2(c, -s, s, c) * p;
 }
 
+vec2 radialFold(vec2 p, bool mirror, float twist) {
+  float r = length(p);
+  float a = atan(p.y, p.x) + r * twist;
+  float wedge = TAU / max(u_segments, 2.0);
+  a = mod(a + TAU, wedge);
+  if (mirror) a = abs(a - wedge * 0.5);
+  return vec2(cos(a), sin(a)) * r;
+}
+
+vec2 symmetryPoint(vec2 p) {
+  float scale = max(u_segments, 2.0) * 0.25;
+
+  // Radial retains the original repeat/mirror checkbox behavior. The
+  // dedicated mirror-radial mode is the always-folded version.
+  if (u_symmetryMode == 0) return radialFold(p, u_mirror, 0.0);
+  if (u_symmetryMode == 1) return radialFold(p, true, 0.0);
+  if (u_symmetryMode == 2) return radialFold(p, true, u_twist);
+  if (u_symmetryMode == 3) {
+    vec2 q = radialFold(p, true, u_twist);
+    float rings = max(1.0, scale);
+    return normalize(q + vec2(0.00001, 0.0)) * fract(length(q) * rings) / rings;
+  }
+  if (u_symmetryMode == 4) {
+    vec2 q = p * scale;
+    for (int i = 0; i < 3; i++) {
+      q = abs(q);
+      q = rotate2d(q, PI / 3.0);
+      q = fract(q * 1.75) - 0.5;
+    }
+    return q / scale;
+  }
+  if (u_symmetryMode == 5) {
+    return abs(fract(p * scale) - 0.5) / scale;
+  }
+  if (u_symmetryMode == 6) {
+    vec2 q = p * scale;
+    q.x *= 1.154700538;
+    q.y += mod(floor(q.x), 2.0) * 0.5;
+    q = fract(q) - 0.5;
+    q.x *= 0.866025404;
+    return abs(q) / scale;
+  }
+  return abs(fract(p * scale) - 0.5) / scale;
+}
+
 vec3 sampleKaleidoscope(vec2 uv) {
   vec2 p = uv - u_center;
   float canvasAspect = u_resolution.x / u_resolution.y;
   p.x *= canvasAspect;
 
-  float r = length(p);
-  float a = atan(p.y, p.x);
-
-  float wedge = TAU / max(u_segments, 2.0);
-  a = mod(a + TAU, wedge);
-
-  if (u_mirror) {
-    a = abs(a - wedge * 0.5);
-  }
-
-  vec2 q = vec2(cos(a), sin(a)) * r;
+  vec2 q = symmetryPoint(p);
   q = rotate2d(q, u_rotation);
   q.x /= canvasAspect;
   q /= max(u_zoom, 0.001);
@@ -165,6 +202,8 @@ const feedbackUniforms = getUniforms(feedbackProgram, [
   "u_imageResolution",
   "u_segments",
   "u_mirror",
+  "u_symmetryMode",
+  "u_twist",
   "u_zoom",
   "u_rotation",
   "u_pan",
@@ -512,6 +551,8 @@ function clearFeedbackTargets() {
 const state = {
   segments: 12,
   mirror: true,
+  symmetryMode: "mirrorRadial",
+  twist: 0.0,
   zoom: 1.0,
   rotationDeg: 0.0,
   panX: 0.0,
@@ -542,13 +583,19 @@ const state = {
     driftY: { source: "none", speed: 0.10, amount: 0.01, phase: 0.25 },
     feedbackAmount: { source: "none", speed: 0.05, amount: 0.15, phase: 0.0 },
     hue: { source: "none", speed: 0.04, amount: 0.35, phase: 0.0 },
-    segments: { source: "none", speed: 0.08, amount: 6, phase: 0.0 }
+    segments: { source: "none", speed: 0.08, amount: 6, phase: 0.0 },
+    twist: { source: "none", speed: 0.08, amount: 4, phase: 0.0 }
   },
   currentTime: 0.0,
   playing: false
 };
 
 const defaults = structuredClone(state);
+
+const SYMMETRY_MODES = [
+  "radial", "mirrorRadial", "spiral", "tunnel",
+  "fractalFold", "tile", "hexagonal", "wallpaper"
+];
 
 const $ = id => document.getElementById(id);
 
@@ -579,6 +626,8 @@ function workspaceSnapshot() {
     state: {
       segments: state.segments,
       mirror: state.mirror,
+      symmetryMode: state.symmetryMode,
+      twist: state.twist,
       zoom: state.zoom,
       rotationDeg: state.rotationDeg,
       panX: state.panX,
@@ -651,7 +700,7 @@ function restoreWorkspaceSettings() {
 
   const s = saved.state;
   const numericKeys = [
-    "segments", "zoom", "rotationDeg", "panX", "panY",
+    "segments", "twist", "zoom", "rotationDeg", "panX", "panY",
     "centerX", "centerY", "speedDeg", "driftX", "driftY",
     "driftSpeed", "pulseAmount", "pulseSpeed", "feedbackAmount",
     "feedbackZoom", "feedbackRotateDeg", "bloomStrength", "bloomThreshold",
@@ -665,6 +714,12 @@ function restoreWorkspaceSettings() {
   }
 
   if (typeof s.mirror === "boolean") state.mirror = s.mirror;
+  if (SYMMETRY_MODES.includes(s.symmetryMode)) {
+    state.symmetryMode = s.symmetryMode;
+  } else {
+    // Workspaces saved before symmetry modes used this checkbox as the mode.
+    state.symmetryMode = state.mirror ? "mirrorRadial" : "radial";
+  }
   if (typeof s.animate === "boolean") state.animate = s.animate;
   if (typeof s.playing === "boolean") state.playing = s.playing;
 
@@ -675,6 +730,7 @@ function restoreWorkspaceSettings() {
   restoreMotionSettings(s.motion);
 
   setValue("segments", state.segments);
+  setValue("twist", state.twist);
   setValue("zoom", state.zoom);
   setValue("rotation", state.rotationDeg);
   setValue("panX", state.panX);
@@ -697,6 +753,7 @@ function restoreWorkspaceSettings() {
   syncMotionButtons();
 
   $("mirror").checked = state.mirror;
+  $("symmetryMode").value = state.symmetryMode;
   $("animate").checked = state.animate;
   $("driftMode").value = state.driftMode;
   if (saved.recordFps === 30 || saved.recordFps === 60) {
@@ -945,6 +1002,7 @@ function bindRange(id, key, format, { livePreview = true } = {}) {
 }
 
 bindRange("segments", "segments", v => String(Math.round(v)));
+bindRange("twist", "twist", v => v.toFixed(2));
 bindRange("zoom", "zoom", v => v.toFixed(2));
 bindRange("rotation", "rotationDeg", v => `${v.toFixed(1)}°`);
 bindRange("panX", "panX", v => v.toFixed(2));
@@ -971,7 +1029,8 @@ const motionMetadata = {
   driftY: { label: "Drift Y", amountMin: 0, amountMax: 0.08, amountStep: 0.001 },
   feedbackAmount: { label: "Feedback amount", amountMin: 0, amountMax: 0.98, amountStep: 0.01 },
   hue: { label: "Hue", amountMin: 0, amountMax: 1, amountStep: 0.01 },
-  segments: { label: "Segments", amountMin: 0, amountMax: 16, amountStep: 1 }
+  segments: { label: "Segments", amountMin: 0, amountMax: 16, amountStep: 1 },
+  twist: { label: "Twist", amountMin: 0, amountMax: 12, amountStep: 0.1 }
 };
 let motionEditorTarget = null;
 
@@ -1126,6 +1185,11 @@ bindBloomRange("bloomRadius", "bloomRadius");
 
 $("mirror").addEventListener("change", e => {
   state.mirror = e.target.checked;
+  previewSceneChange();
+});
+
+$("symmetryMode").addEventListener("change", e => {
+  state.symmetryMode = e.target.value;
   previewSceneChange();
 });
 
@@ -1405,6 +1469,8 @@ function applyPreset(name) {
     flower: {
       segments: 12,
       mirror: true,
+      symmetryMode: "mirrorRadial",
+      twist: 0.0,
       zoom: 1.35,
       rotationDeg: 8.0,
       panX: 0.00,
@@ -1426,6 +1492,8 @@ function applyPreset(name) {
     crystal: {
       segments: 16,
       mirror: true,
+      symmetryMode: "hexagonal",
+      twist: 0.0,
       zoom: 1.8,
       rotationDeg: 0.0,
       panX: 0.02,
@@ -1447,6 +1515,8 @@ function applyPreset(name) {
     tunnel: {
       segments: 8,
       mirror: true,
+      symmetryMode: "tunnel",
+      twist: 2.5,
       zoom: 2.3,
       rotationDeg: 0.0,
       panX: 0.00,
@@ -1474,6 +1544,7 @@ function applyPreset(name) {
 
   const idMap = {
     segments: "segments",
+    twist: "twist",
     zoom: "zoom",
     rotationDeg: "rotation",
     panX: "panX",
@@ -1496,6 +1567,7 @@ function applyPreset(name) {
   }
 
   $("mirror").checked = state.mirror;
+  $("symmetryMode").value = state.symmetryMode;
   $("animate").checked = state.animate;
   setSelectValue("driftMode", state.driftMode);
   syncTimelineControls();
@@ -1516,6 +1588,7 @@ $("reset").addEventListener("click", () => {
   Object.assign(state, structuredClone(defaults));
 
   setValue("segments", state.segments);
+  setValue("twist", state.twist);
   setValue("zoom", state.zoom);
   setValue("rotation", state.rotationDeg);
   setValue("panX", state.panX);
@@ -1538,6 +1611,7 @@ $("reset").addEventListener("click", () => {
   syncMotionButtons();
 
   $("mirror").checked = state.mirror;
+  $("symmetryMode").value = state.symmetryMode;
   $("animate").checked = state.animate;
   setSelectValue("driftMode", state.driftMode);
   syncTimelineControls();
@@ -1875,6 +1949,7 @@ function computeDynamicAtTime(t) {
     panX: applyMotion("panX", state.panX + drift.x, t),
     panY: applyMotion("panY", state.panY + drift.y, t),
     segments: Math.max(2, Math.round(applyMotion("segments", state.segments, t))),
+    twist: applyMotion("twist", state.twist, t),
     feedbackAmount: Math.min(0.98, Math.max(0, applyMotion("feedbackAmount", state.feedbackAmount, t))),
     hue: fract(applyMotion("hue", state.hue, t))
   };
@@ -1908,6 +1983,8 @@ function drawFeedbackPass(dynamic) {
   );
   gl.uniform1f(feedbackUniforms.u_segments, dynamic.segments);
   gl.uniform1i(feedbackUniforms.u_mirror, state.mirror ? 1 : 0);
+  gl.uniform1i(feedbackUniforms.u_symmetryMode, Math.max(0, SYMMETRY_MODES.indexOf(state.symmetryMode)));
+  gl.uniform1f(feedbackUniforms.u_twist, dynamic.twist);
   gl.uniform1f(feedbackUniforms.u_zoom, dynamic.zoom);
   gl.uniform1f(feedbackUniforms.u_rotation, dynamic.rotationRad);
   gl.uniform2f(feedbackUniforms.u_pan, dynamic.panX, dynamic.panY);

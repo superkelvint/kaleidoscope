@@ -34,6 +34,20 @@
       <div class="subhead">Symmetry</div>
 
       <div class="row">
+        <label for="symmetryMode">Symmetry mode</label>
+        <select id="symmetryMode" class="select">
+          <option value="radial">Radial</option>
+          <option value="mirrorRadial" selected>Mirror radial</option>
+          <option value="spiral">Spiral</option>
+          <option value="tunnel">Tunnel</option>
+          <option value="fractalFold">Fractal fold</option>
+          <option value="tile">Tile</option>
+          <option value="hexagonal">Hexagonal</option>
+          <option value="wallpaper">Wallpaper</option>
+        </select>
+      </div>
+
+      <div class="row">
         <div class="rowLabel">
           <span>Segments <button class="motionButton" type="button" data-motion="segments" aria-label="Animate segments">~</button></span>
           <output id="segmentsOut">12</output>
@@ -46,8 +60,16 @@
 
       <label class="check">
         <input id="mirror" type="checkbox" checked />
-        Mirror alternate wedges
+        Mirror alternate wedges (Radial mode)
       </label>
+
+      <div class="row">
+        <div class="rowLabel"><span>Twist <button class="motionButton" type="button" data-motion="twist" aria-label="Animate twist">~</button></span><output id="twistOut">0.00</output></div>
+        <div class="rangeLine">
+          <input id="twist" type="range" min="-20" max="20" step="0.01" value="0" />
+          <input id="twistNum" class="num" type="number" min="-20" max="20" step="0.01" value="0" />
+        </div>
+      </div>
 
       <div class="row">
         <div class="rowLabel"><span>Zoom <button class="motionButton" type="button" data-motion="zoom" aria-label="Animate zoom">~</button></span><output id="zoomOut">1.00</output></div>

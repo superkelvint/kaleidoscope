@@ -11,7 +11,8 @@ No backend. No upload. Just WebGL in the browser.
 - Use any image as the source
 - Real-time WebGL2 rendering
 - 2–32 kaleidoscope segments
-- Mirrored or repeated wedges
+- Eight symmetry geometries: radial, mirror radial, spiral, tunnel, fractal fold, tile, hexagonal and wallpaper
+- Twistable spiral mandalas, including animated twist modulation
 - Drag to pan, scroll to zoom
 - Rotation, drift and zoom animation
 - Linear, oscillating, orbital and smooth-random drift
@@ -121,4 +122,3 @@ Things I'd like to play with next:
 - better high-resolution rendering
 
 PRs and experiments welcome.
-
