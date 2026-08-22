@@ -67,6 +67,7 @@ h1 {
   border: 1px solid #333;
   border-radius: 8px;
   background: #1c1c1c;
+  transition: background 140ms ease, border-color 140ms ease;
 }
 
 .controlSection > summary {
@@ -86,7 +87,19 @@ h1 {
 .controlSection > summary::marker { color: #888; }
 
 .controlSection[open] > summary {
-  border-bottom: 1px solid #333;
+  color: #f2efff;
+  border-bottom: 1px solid #6252ad;
+  background: #30294a;
+}
+
+.controlSection[open] {
+  border-color: #6252ad;
+  background: #242038;
+  box-shadow: inset 3px 0 0 #8d79ff;
+}
+
+.controlSection[open] > summary::marker {
+  color: #b8aaff;
 }
 
 .controlSection > :not(summary) {
