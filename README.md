@@ -11,7 +11,7 @@ No backend. No upload. Just WebGL in the browser.
 - Use any image as the source
 - Real-time WebGL2 rendering
 - 2–32 kaleidoscope segments
-- Eight symmetry geometries: radial, mirror radial, spiral, tunnel, fractal fold, tile, hexagonal and wallpaper
+- Eleven symmetry geometries, including half-turn, quarter-turn and glide kaleidoscopes
 - Twistable spiral mandalas, including animated twist modulation
 - Drag to pan, scroll to zoom
 - Rotation, drift and zoom animation

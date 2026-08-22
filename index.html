@@ -22,7 +22,7 @@
       </label>
       <div id="persistenceStatus" class="recordingStatus">Local workspace save enabled.</div>
 
-      <div class="presetGroup">
+      <div class="presetGroup" hidden>
         <div class="subhead">Presets</div>
         <div class="presetButtons">
           <button class="preset" data-preset="flower">Flower</button>
@@ -42,6 +42,9 @@
           <option value="tunnel">Tunnel</option>
           <option value="fractalFold">Fractal fold</option>
           <option value="tile">Tile</option>
+          <option value="p2">Half-turn kaleidoscope</option>
+          <option value="p4">Quarter-turn kaleidoscope</option>
+          <option value="pg">Glide kaleidoscope</option>
           <option value="hexagonal">Hexagonal</option>
           <option value="wallpaper">Wallpaper</option>
         </select>
@@ -49,7 +52,7 @@
 
       <div class="row">
         <div class="rowLabel">
-          <span>Segments <button class="motionButton" type="button" data-motion="segments" aria-label="Animate segments">~</button></span>
+          <span><span id="segmentsLabel">Segments</span> <button class="motionButton" type="button" data-motion="segments" aria-label="Animate segments">~</button></span>
           <output id="segmentsOut">12</output>
         </div>
         <div class="rangeLine">

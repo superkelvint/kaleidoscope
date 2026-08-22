@@ -50,25 +50,65 @@ vec2 rotate2d(vec2 p, float a) {
   return mat2(c, -s, s, c) * p;
 }
 
-vec2 radialFold(vec2 p, bool mirror, float twist) {
+vec2 radialFold(vec2 p, bool mirror) {
   float r = length(p);
-  float a = atan(p.y, p.x) + r * twist;
+  float a = atan(p.y, p.x);
   float wedge = TAU / max(u_segments, 2.0);
   a = mod(a + TAU, wedge);
   if (mirror) a = abs(a - wedge * 0.5);
   return vec2(cos(a), sin(a)) * r;
 }
 
+vec2 twistPoint(vec2 p) {
+  return rotate2d(p, length(p) * u_twist);
+}
+
+vec2 mirrorTile(vec2 p, float scale) {
+  return abs(fract(p * scale) - 0.5) / scale;
+}
+
+float radialRing(vec2 p, float scale) {
+  return floor(length(p) * max(2.0, scale * 2.0));
+}
+
+vec2 halfTurnTile(vec2 p, float scale) {
+  vec2 q = radialFold(p, true);
+  // Alternate concentric folded wedges through 180° source rotations.
+  float turn = mod(radialRing(p, scale), 2.0) * PI;
+  return rotate2d(q, turn);
+}
+
+vec2 quarterTurnTile(vec2 p, float scale) {
+  vec2 q = radialFold(p, true);
+  // Keep every wedge in a band identical; the four source rotations cycle
+  // only between concentric bands, preserving the radial kaleidoscope.
+  float quarterTurns = mod(radialRing(p, scale), 4.0);
+  return rotate2d(q, quarterTurns * PI * 0.5);
+}
+
+vec2 glideMirrorTile(vec2 p, float scale) {
+  float wedge = TAU / max(u_segments, 2.0);
+  float ring = radialRing(p, scale);
+  // Shift every other concentric band by half a wedge before the mirror fold.
+  float glideOffset = mod(ring, 2.0) * wedge * 0.5;
+  vec2 q = radialFold(rotate2d(p, glideOffset), true);
+  if (mod(ring, 2.0) > 0.5) q = rotate2d(q, PI);
+  return q;
+}
+
 vec2 symmetryPoint(vec2 p) {
+  // Apply twist before each geometry chooses its canonical source region, so
+  // the control remains meaningful for radial and planar modes alike.
+  p = twistPoint(p);
   float scale = max(u_segments, 2.0) * 0.25;
 
   // Radial retains the original repeat/mirror checkbox behavior. The
   // dedicated mirror-radial mode is the always-folded version.
-  if (u_symmetryMode == 0) return radialFold(p, u_mirror, 0.0);
-  if (u_symmetryMode == 1) return radialFold(p, true, 0.0);
-  if (u_symmetryMode == 2) return radialFold(p, true, u_twist);
+  if (u_symmetryMode == 0) return radialFold(p, u_mirror);
+  if (u_symmetryMode == 1) return radialFold(p, true);
+  if (u_symmetryMode == 2) return radialFold(p, true);
   if (u_symmetryMode == 3) {
-    vec2 q = radialFold(p, true, u_twist);
+    vec2 q = radialFold(p, true);
     float rings = max(1.0, scale);
     return normalize(q + vec2(0.00001, 0.0)) * fract(length(q) * rings) / rings;
   }
@@ -82,9 +122,12 @@ vec2 symmetryPoint(vec2 p) {
     return q / scale;
   }
   if (u_symmetryMode == 5) {
-    return abs(fract(p * scale) - 0.5) / scale;
+    return mirrorTile(p, scale);
   }
-  if (u_symmetryMode == 6) {
+  if (u_symmetryMode == 6) return halfTurnTile(p, scale);
+  if (u_symmetryMode == 7) return quarterTurnTile(p, scale);
+  if (u_symmetryMode == 8) return glideMirrorTile(p, scale);
+  if (u_symmetryMode == 9) {
     vec2 q = p * scale;
     q.x *= 1.154700538;
     q.y += mod(floor(q.x), 2.0) * 0.5;
@@ -92,7 +135,7 @@ vec2 symmetryPoint(vec2 p) {
     q.x *= 0.866025404;
     return abs(q) / scale;
   }
-  return abs(fract(p * scale) - 0.5) / scale;
+  return mirrorTile(p, scale);
 }
 
 vec3 sampleKaleidoscope(vec2 uv) {
@@ -594,8 +637,9 @@ const defaults = structuredClone(state);
 
 const SYMMETRY_MODES = [
   "radial", "mirrorRadial", "spiral", "tunnel",
-  "fractalFold", "tile", "hexagonal", "wallpaper"
+  "fractalFold", "tile", "p2", "p4", "pg", "hexagonal", "wallpaper"
 ];
+const PLANAR_SYMMETRY_MODES = new Set(["tile", "p2", "p4", "pg", "hexagonal", "wallpaper"]);
 
 const $ = id => document.getElementById(id);
 
@@ -754,6 +798,7 @@ function restoreWorkspaceSettings() {
 
   $("mirror").checked = state.mirror;
   $("symmetryMode").value = state.symmetryMode;
+  syncSymmetryModeUI();
   $("animate").checked = state.animate;
   $("driftMode").value = state.driftMode;
   if (saved.recordFps === 30 || saved.recordFps === 60) {
@@ -1190,8 +1235,15 @@ $("mirror").addEventListener("change", e => {
 
 $("symmetryMode").addEventListener("change", e => {
   state.symmetryMode = e.target.value;
+  syncSymmetryModeUI();
   previewSceneChange();
 });
+
+function syncSymmetryModeUI() {
+  $("segmentsLabel").textContent = PLANAR_SYMMETRY_MODES.has(state.symmetryMode)
+    ? "Pattern density"
+    : "Segments";
+}
 
 $("animate").addEventListener("change", e => {
   state.animate = e.target.checked;
@@ -1568,6 +1620,7 @@ function applyPreset(name) {
 
   $("mirror").checked = state.mirror;
   $("symmetryMode").value = state.symmetryMode;
+  syncSymmetryModeUI();
   $("animate").checked = state.animate;
   setSelectValue("driftMode", state.driftMode);
   syncTimelineControls();
@@ -1612,6 +1665,7 @@ $("reset").addEventListener("click", () => {
 
   $("mirror").checked = state.mirror;
   $("symmetryMode").value = state.symmetryMode;
+  syncSymmetryModeUI();
   $("animate").checked = state.animate;
   setSelectValue("driftMode", state.driftMode);
   syncTimelineControls();
