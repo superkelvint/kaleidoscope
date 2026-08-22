@@ -12,6 +12,7 @@ No backend. No upload. Just WebGL in the browser.
 - Real-time WebGL2 rendering
 - 2–32 kaleidoscope segments
 - Eleven symmetry geometries, including half-turn, quarter-turn and glide kaleidoscopes
+- Independent grid layouts: p6m, p4m, p3m1 and p31m
 - Twistable spiral mandalas, including animated twist modulation
 - Drag to pan, scroll to zoom
 - Rotation, drift and zoom animation
@@ -33,6 +34,18 @@ Load an image, give it a little movement, and see where it goes.
 A boring photograph can suddenly produce flowers, stained glass, crystals, tunnels, strange organic things, and occasionally something ridiculously beautiful.
 
 When that happens, you can pause and scrub backwards through the timeline instead of losing it forever.
+
+## Local motifs and grid layouts
+
+The **Local Motif Symmetry** control shapes one kaleidoscope motif around its
+own centre. **Grid** is a separate layer that places many
+of those motifs across the canvas and sets their neighbour relationships.
+
+For example, select Mirror radial locally and Hex Flower (p6m) globally to
+make a triangular field of mirrored radial rosettes. Changing the local motif
+does not change the global lattice; changing the wallpaper layout does not
+replace the chosen local motif. Use **Grid spacing**, **Grid rotation** and
+**Grid X/Y** to place the lattice without changing the local motif settings.
 
 ## Motion
 

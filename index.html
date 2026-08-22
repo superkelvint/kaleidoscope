@@ -31,7 +31,8 @@
         </div>
       </div>
 
-      <div class="subhead">Symmetry</div>
+      <details class="controlSection" open>
+        <summary>Local Motif</summary>
 
       <div class="row">
         <label for="symmetryMode">Symmetry mode</label>
@@ -122,9 +123,56 @@
         </div>
       </div>
 
-      <hr />
+      </details>
 
-      <div class="subhead">Motion</div>
+      <details class="controlSection" open>
+        <summary>Grid</summary>
+
+        <div class="row">
+          <label for="wallpaperMode">Grid layout</label>
+          <select id="wallpaperMode" class="select">
+            <option value="p6m" selected>p6m</option>
+            <option value="p4m">p4m</option>
+            <option value="p3m1">p3m1</option>
+            <option value="p31m">p31m</option>
+          </select>
+        </div>
+
+        <div class="row">
+          <div class="rowLabel"><span>Grid spacing</span><output id="wallpaperSizeOut">0.45</output></div>
+          <div class="rangeLine">
+            <input id="wallpaperSize" type="range" min="0.10" max="2.00" step="0.01" value="0.45" />
+            <input id="wallpaperSizeNum" class="num" type="number" min="0.10" max="2.00" step="0.01" value="0.45" />
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="rowLabel"><span>Grid rotation</span><output id="gridRotationOut">0.0°</output></div>
+          <div class="rangeLine">
+            <input id="gridRotation" type="range" min="-180" max="180" step="0.1" value="0" />
+            <input id="gridRotationNum" class="num" type="number" min="-180" max="180" step="0.1" value="0" />
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="rowLabel"><span>Grid X</span><output id="gridXOut">0.00</output></div>
+          <div class="rangeLine">
+            <input id="gridX" type="range" min="-1" max="1" step="0.001" value="0" />
+            <input id="gridXNum" class="num" type="number" min="-1" max="1" step="0.001" value="0" />
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="rowLabel"><span>Grid Y</span><output id="gridYOut">0.00</output></div>
+          <div class="rangeLine">
+            <input id="gridY" type="range" min="-1" max="1" step="0.001" value="0" />
+            <input id="gridYNum" class="num" type="number" min="-1" max="1" step="0.001" value="0" />
+          </div>
+        </div>
+      </details>
+
+      <details class="controlSection">
+        <summary>Motion</summary>
 
       <label class="check">
         <input id="animate" type="checkbox" checked />
@@ -189,9 +237,10 @@
         </div>
       </div>
 
-      <hr />
+      </details>
 
-      <div class="subhead">Feedback Trails</div>
+      <details class="controlSection">
+        <summary>Feedback Trails</summary>
 
       <div class="row">
         <div class="rowLabel"><span>Feedback amount <button class="motionButton" type="button" data-motion="feedbackAmount" aria-label="Animate feedback amount">~</button></span><output id="feedbackAmountOut">0.00</output></div>
@@ -217,9 +266,10 @@
         </div>
       </div>
 
-      <hr />
+      </details>
 
-      <div class="subhead">Bloom</div>
+      <details class="controlSection">
+        <summary>Bloom</summary>
 
       <div class="row">
         <label for="bloomStrength">Bloom</label>
@@ -239,9 +289,10 @@
           aria-label="Bloom glow size, from small to large" />
       </div>
 
-      <hr />
+      </details>
 
-      <div class="subhead">Color</div>
+      <details class="controlSection">
+        <summary>Color</summary>
 
       <div class="row">
         <div class="rowLabel"><span>Hue <button class="motionButton" type="button" data-motion="hue" aria-label="Animate hue">~</button></span><output id="hueOut">0.00</output></div>
@@ -251,9 +302,10 @@
         </div>
       </div>
 
-      <hr />
+      </details>
 
-      <div class="subhead">Timeline</div>
+      <details class="controlSection">
+        <summary>Timeline</summary>
 
       <div class="row">
         <label>Time <output id="timelineOut">0.00 s</output></label>
@@ -273,9 +325,10 @@
         <button id="stepForward">1s ▶</button>
       </div>
 
-      <hr />
+      </details>
 
-      <div class="subhead">Recording</div>
+      <details class="controlSection">
+        <summary>Recording</summary>
 
       <div class="row">
         <label>Frame rate</label>
@@ -297,6 +350,8 @@
         <button id="reset">Reset</button>
         <button id="save">Save PNG</button>
       </div>
+
+      </details>
 
       <p class="hint">
         Tip: drag directly on the canvas to pan the source image. Use the mouse wheel to zoom.

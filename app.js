@@ -1,3 +1,8 @@
+import {
+  GLOBAL_WALLPAPER_GLSL,
+  globalWallpaperModeIndex
+} from "./global-wallpaper.js";
+
 const canvas = document.querySelector("#gl");
 const gl = canvas.getContext("webgl2", {
   antialias: true,
@@ -31,6 +36,10 @@ uniform vec2 u_imageResolution;
 uniform float u_segments;
 uniform bool u_mirror;
 uniform int u_symmetryMode;
+uniform int u_wallpaperMode;
+uniform float u_wallpaperSize;
+uniform float u_gridRotation;
+uniform vec2 u_gridOffset;
 uniform float u_twist;
 uniform float u_zoom;
 uniform float u_rotation;
@@ -49,6 +58,8 @@ vec2 rotate2d(vec2 p, float a) {
   float s = sin(a);
   return mat2(c, -s, s, c) * p;
 }
+
+${GLOBAL_WALLPAPER_GLSL}
 
 vec2 radialFold(vec2 p, bool mirror) {
   float r = length(p);
@@ -96,7 +107,9 @@ vec2 glideMirrorTile(vec2 p, float scale) {
   return q;
 }
 
-vec2 symmetryPoint(vec2 p) {
+// This is deliberately the local layer only: it describes the motif around
+// one motif centre and knows nothing about the global wallpaper lattice.
+vec2 localMotifPoint(vec2 p) {
   // Apply twist before each geometry chooses its canonical source region, so
   // the control remains meaningful for radial and planar modes alike.
   p = twistPoint(p);
@@ -143,7 +156,19 @@ vec3 sampleKaleidoscope(vec2 uv) {
   float canvasAspect = u_resolution.x / u_resolution.y;
   p.x *= canvasAspect;
 
-  vec2 q = symmetryPoint(p);
+  // GLOBAL: position and rotate the grid, then choose the owning lattice cell
+  // and express this pixel relative to its motif centre. This stays
+  // independent of the local motif selection.
+  // Single has no lattice, so grid placement controls intentionally do not
+  // change its one local motif.
+  vec2 gridPoint = p;
+  if (u_wallpaperMode != 0) {
+    gridPoint = rotate2d(p - u_gridOffset, -u_gridRotation);
+  }
+  vec2 localPoint = globalWallpaperPoint(gridPoint, u_wallpaperMode, u_wallpaperSize);
+
+  // LOCAL: fold that cell-local coordinate with the selected kaleidoscope.
+  vec2 q = localMotifPoint(localPoint);
   q = rotate2d(q, u_rotation);
   q.x /= canvasAspect;
   q /= max(u_zoom, 0.001);
@@ -246,6 +271,10 @@ const feedbackUniforms = getUniforms(feedbackProgram, [
   "u_segments",
   "u_mirror",
   "u_symmetryMode",
+  "u_wallpaperMode",
+  "u_wallpaperSize",
+  "u_gridRotation",
+  "u_gridOffset",
   "u_twist",
   "u_zoom",
   "u_rotation",
@@ -595,6 +624,11 @@ const state = {
   segments: 12,
   mirror: true,
   symmetryMode: "mirrorRadial",
+  wallpaperMode: "p6m",
+  wallpaperSize: 0.45,
+  gridRotationDeg: 0.0,
+  gridX: 0.0,
+  gridY: 0.0,
   twist: 0.0,
   zoom: 1.0,
   rotationDeg: 0.0,
@@ -640,8 +674,23 @@ const SYMMETRY_MODES = [
   "fractalFold", "tile", "p2", "p4", "pg", "hexagonal", "wallpaper"
 ];
 const PLANAR_SYMMETRY_MODES = new Set(["tile", "p2", "p4", "pg", "hexagonal", "wallpaper"]);
+const GRID_LAYOUT_MODES = ["p6m", "p4m", "p3m1", "p31m"];
 
 const $ = id => document.getElementById(id);
+
+// The UI intentionally exposes the four primary grid groups only.
+function populateWallpaperModes() {
+  const select = $("wallpaperMode");
+  select.replaceChildren(...GRID_LAYOUT_MODES.map(mode => {
+    const option = document.createElement("option");
+    option.value = mode;
+    option.textContent = mode;
+    return option;
+  }));
+  select.value = state.wallpaperMode;
+}
+
+populateWallpaperModes();
 
 // -----------------------------------------------------------------------------
 // Local workspace persistence
@@ -671,6 +720,11 @@ function workspaceSnapshot() {
       segments: state.segments,
       mirror: state.mirror,
       symmetryMode: state.symmetryMode,
+      wallpaperMode: state.wallpaperMode,
+      wallpaperSize: state.wallpaperSize,
+      gridRotationDeg: state.gridRotationDeg,
+      gridX: state.gridX,
+      gridY: state.gridY,
       twist: state.twist,
       zoom: state.zoom,
       rotationDeg: state.rotationDeg,
@@ -744,7 +798,7 @@ function restoreWorkspaceSettings() {
 
   const s = saved.state;
   const numericKeys = [
-    "segments", "twist", "zoom", "rotationDeg", "panX", "panY",
+    "segments", "wallpaperSize", "gridRotationDeg", "gridX", "gridY", "twist", "zoom", "rotationDeg", "panX", "panY",
     "centerX", "centerY", "speedDeg", "driftX", "driftY",
     "driftSpeed", "pulseAmount", "pulseSpeed", "feedbackAmount",
     "feedbackZoom", "feedbackRotateDeg", "bloomStrength", "bloomThreshold",
@@ -764,6 +818,11 @@ function restoreWorkspaceSettings() {
     // Workspaces saved before symmetry modes used this checkbox as the mode.
     state.symmetryMode = state.mirror ? "mirrorRadial" : "radial";
   }
+  if (GRID_LAYOUT_MODES.includes(s.wallpaperMode)) {
+    state.wallpaperMode = s.wallpaperMode;
+  } else {
+    state.wallpaperMode = "p6m";
+  }
   if (typeof s.animate === "boolean") state.animate = s.animate;
   if (typeof s.playing === "boolean") state.playing = s.playing;
 
@@ -774,6 +833,10 @@ function restoreWorkspaceSettings() {
   restoreMotionSettings(s.motion);
 
   setValue("segments", state.segments);
+  setValue("wallpaperSize", state.wallpaperSize);
+  setValue("gridRotation", state.gridRotationDeg);
+  setValue("gridX", state.gridX);
+  setValue("gridY", state.gridY);
   setValue("twist", state.twist);
   setValue("zoom", state.zoom);
   setValue("rotation", state.rotationDeg);
@@ -798,6 +861,7 @@ function restoreWorkspaceSettings() {
 
   $("mirror").checked = state.mirror;
   $("symmetryMode").value = state.symmetryMode;
+  $("wallpaperMode").value = state.wallpaperMode;
   syncSymmetryModeUI();
   $("animate").checked = state.animate;
   $("driftMode").value = state.driftMode;
@@ -1047,6 +1111,10 @@ function bindRange(id, key, format, { livePreview = true } = {}) {
 }
 
 bindRange("segments", "segments", v => String(Math.round(v)));
+bindRange("wallpaperSize", "wallpaperSize", v => v.toFixed(2));
+bindRange("gridRotation", "gridRotationDeg", v => `${v.toFixed(1)}°`);
+bindRange("gridX", "gridX", v => v.toFixed(2));
+bindRange("gridY", "gridY", v => v.toFixed(2));
 bindRange("twist", "twist", v => v.toFixed(2));
 bindRange("zoom", "zoom", v => v.toFixed(2));
 bindRange("rotation", "rotationDeg", v => `${v.toFixed(1)}°`);
@@ -1236,6 +1304,11 @@ $("mirror").addEventListener("change", e => {
 $("symmetryMode").addEventListener("change", e => {
   state.symmetryMode = e.target.value;
   syncSymmetryModeUI();
+  previewSceneChange();
+});
+
+$("wallpaperMode").addEventListener("change", e => {
+  state.wallpaperMode = e.target.value;
   previewSceneChange();
 });
 
@@ -1620,6 +1693,7 @@ function applyPreset(name) {
 
   $("mirror").checked = state.mirror;
   $("symmetryMode").value = state.symmetryMode;
+  $("wallpaperMode").value = state.wallpaperMode;
   syncSymmetryModeUI();
   $("animate").checked = state.animate;
   setSelectValue("driftMode", state.driftMode);
@@ -1641,6 +1715,10 @@ $("reset").addEventListener("click", () => {
   Object.assign(state, structuredClone(defaults));
 
   setValue("segments", state.segments);
+  setValue("wallpaperSize", state.wallpaperSize);
+  setValue("gridRotation", state.gridRotationDeg);
+  setValue("gridX", state.gridX);
+  setValue("gridY", state.gridY);
   setValue("twist", state.twist);
   setValue("zoom", state.zoom);
   setValue("rotation", state.rotationDeg);
@@ -1665,6 +1743,7 @@ $("reset").addEventListener("click", () => {
 
   $("mirror").checked = state.mirror;
   $("symmetryMode").value = state.symmetryMode;
+  $("wallpaperMode").value = state.wallpaperMode;
   syncSymmetryModeUI();
   $("animate").checked = state.animate;
   setSelectValue("driftMode", state.driftMode);
@@ -2038,6 +2117,10 @@ function drawFeedbackPass(dynamic) {
   gl.uniform1f(feedbackUniforms.u_segments, dynamic.segments);
   gl.uniform1i(feedbackUniforms.u_mirror, state.mirror ? 1 : 0);
   gl.uniform1i(feedbackUniforms.u_symmetryMode, Math.max(0, SYMMETRY_MODES.indexOf(state.symmetryMode)));
+  gl.uniform1i(feedbackUniforms.u_wallpaperMode, globalWallpaperModeIndex(state.wallpaperMode));
+  gl.uniform1f(feedbackUniforms.u_wallpaperSize, state.wallpaperSize);
+  gl.uniform1f(feedbackUniforms.u_gridRotation, state.gridRotationDeg * Math.PI / 180.0);
+  gl.uniform2f(feedbackUniforms.u_gridOffset, state.gridX, state.gridY);
   gl.uniform1f(feedbackUniforms.u_twist, dynamic.twist);
   gl.uniform1f(feedbackUniforms.u_zoom, dynamic.zoom);
   gl.uniform1f(feedbackUniforms.u_rotation, dynamic.rotationRad);
