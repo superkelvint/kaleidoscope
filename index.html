@@ -34,10 +34,10 @@
       <div class="subhead">Symmetry</div>
 
       <div class="row">
-        <label>
-          Segments
+        <div class="rowLabel">
+          <span>Segments <button class="motionButton" type="button" data-motion="segments" aria-label="Animate segments">~</button></span>
           <output id="segmentsOut">12</output>
-        </label>
+        </div>
         <div class="rangeLine">
           <input id="segments" type="range" min="2" max="32" step="1" value="12" />
           <input id="segmentsNum" class="num" type="number" min="2" max="32" step="1" value="12" />
@@ -50,7 +50,7 @@
       </label>
 
       <div class="row">
-        <label>Zoom <output id="zoomOut">1.00</output></label>
+        <div class="rowLabel"><span>Zoom <button class="motionButton" type="button" data-motion="zoom" aria-label="Animate zoom">~</button></span><output id="zoomOut">1.00</output></div>
         <div class="rangeLine">
           <input id="zoom" type="range" min="0.2" max="5" step="0.01" value="1" />
           <input id="zoomNum" class="num" type="number" min="0.2" max="5" step="0.01" value="1" />
@@ -58,7 +58,7 @@
       </div>
 
       <div class="row">
-        <label>Rotation <output id="rotationOut">0.0°</output></label>
+        <div class="rowLabel"><span>Rotation <button class="motionButton" type="button" data-motion="rotationDeg" aria-label="Animate rotation">~</button></span><output id="rotationOut">0.0°</output></div>
         <div class="rangeLine">
           <input id="rotation" type="range" min="-180" max="180" step="0.1" value="0" />
           <input id="rotationNum" class="num" type="number" min="-180" max="180" step="0.1" value="0" />
@@ -66,7 +66,7 @@
       </div>
 
       <div class="row">
-        <label>Pan X <output id="panXOut">0.00</output></label>
+        <div class="rowLabel"><span>Pan X <button class="motionButton" type="button" data-motion="panX" aria-label="Animate pan X">~</button></span><output id="panXOut">0.00</output></div>
         <div class="rangeLine">
           <input id="panX" type="range" min="-1" max="1" step="0.001" value="0" />
           <input id="panXNum" class="num" type="number" min="-1" max="1" step="0.001" value="0" />
@@ -74,7 +74,7 @@
       </div>
 
       <div class="row">
-        <label>Pan Y <output id="panYOut">0.00</output></label>
+        <div class="rowLabel"><span>Pan Y <button class="motionButton" type="button" data-motion="panY" aria-label="Animate pan Y">~</button></span><output id="panYOut">0.00</output></div>
         <div class="rangeLine">
           <input id="panY" type="range" min="-1" max="1" step="0.001" value="0" />
           <input id="panYNum" class="num" type="number" min="-1" max="1" step="0.001" value="0" />
@@ -115,7 +115,7 @@
       </div>
 
       <div class="row">
-        <label>Drift X <output id="driftXOut">0.00</output></label>
+        <div class="rowLabel"><span>Drift X <button class="motionButton" type="button" data-motion="driftX" aria-label="Animate drift X">~</button></span><output id="driftXOut">0.00</output></div>
         <div class="rangeLine">
           <input id="driftX" type="range" min="-0.25" max="0.25" step="0.001" value="0.00" />
           <input id="driftXNum" class="num" type="number" min="-0.25" max="0.25" step="0.001" value="0.00" />
@@ -123,7 +123,7 @@
       </div>
 
       <div class="row">
-        <label>Drift Y <output id="driftYOut">0.00</output></label>
+        <div class="rowLabel"><span>Drift Y <button class="motionButton" type="button" data-motion="driftY" aria-label="Animate drift Y">~</button></span><output id="driftYOut">0.00</output></div>
         <div class="rangeLine">
           <input id="driftY" type="range" min="-0.25" max="0.25" step="0.001" value="0.00" />
           <input id="driftYNum" class="num" type="number" min="-0.25" max="0.25" step="0.001" value="0.00" />
@@ -169,7 +169,7 @@
       <div class="subhead">Feedback Trails</div>
 
       <div class="row">
-        <label>Feedback amount <output id="feedbackAmountOut">0.00</output></label>
+        <div class="rowLabel"><span>Feedback amount <button class="motionButton" type="button" data-motion="feedbackAmount" aria-label="Animate feedback amount">~</button></span><output id="feedbackAmountOut">0.00</output></div>
         <div class="rangeLine">
           <input id="feedbackAmount" type="range" min="0" max="0.98" step="0.001" value="0.00" />
           <input id="feedbackAmountNum" class="num" type="number" min="0" max="0.98" step="0.001" value="0.00" />
@@ -212,6 +212,18 @@
         <label for="bloomRadius">Glow size</label>
         <input id="bloomRadius" type="range" min="0.5" max="3" step="0.05" value="1.5"
           aria-label="Bloom glow size, from small to large" />
+      </div>
+
+      <hr />
+
+      <div class="subhead">Color</div>
+
+      <div class="row">
+        <div class="rowLabel"><span>Hue <button class="motionButton" type="button" data-motion="hue" aria-label="Animate hue">~</button></span><output id="hueOut">0.00</output></div>
+        <div class="rangeLine">
+          <input id="hue" type="range" min="0" max="1" step="0.01" value="0" />
+          <input id="hueNum" class="num" type="number" min="0" max="1" step="0.01" value="0" />
+        </div>
       </div>
 
       <hr />
@@ -265,6 +277,28 @@
         Tip: drag directly on the canvas to pan the source image. Use the mouse wheel to zoom.
         Use the timeline slider to revisit a beautiful moment exactly. Recording still prefers MP4/H.264 when supported and falls back to WebM otherwise.
       </p>
+
+      <section id="motionEditor" class="motionEditor" hidden aria-live="polite">
+        <div class="motionEditorHeader">
+          <strong>Motion: <span id="motionTargetName"></span></strong>
+          <button id="closeMotionEditor" type="button" aria-label="Close motion editor">×</button>
+        </div>
+        <fieldset id="motionSourceOptions">
+          <legend>Modulation source</legend>
+          <label><input type="radio" name="motionSource" value="none" /> None</label>
+          <label><input type="radio" name="motionSource" value="sine" /> Sine</label>
+          <label><input type="radio" name="motionSource" value="triangle" /> Triangle</label>
+          <label><input type="radio" name="motionSource" value="smoothRandom" /> Smooth random</label>
+          <label><input type="radio" name="motionSource" value="ramp" /> Ramp</label>
+          <label><input type="radio" name="motionSource" value="steps" /> Steps</label>
+        </fieldset>
+        <p id="motionBaseDescription" class="motionBaseDescription"></p>
+        <div id="motionSourceControls" hidden>
+          <div class="row"><label>Speed <output id="motionSpeedOut"></output></label><input id="motionSpeed" type="range" min="0" max="2" step="0.01" /></div>
+          <div class="row"><label>Variation <output id="motionAmountOut"></output></label><input id="motionAmount" type="range" /></div>
+          <div class="row"><label>Phase <output id="motionPhaseOut"></output></label><input id="motionPhase" type="range" min="0" max="1" step="0.01" /></div>
+        </div>
+      </section>
     </aside>
   </main>
 

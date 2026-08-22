@@ -66,11 +66,28 @@ h1 {
   margin: 16px 0;
 }
 
-.row label {
+.row label,
+.rowLabel {
   display: flex;
   justify-content: space-between;
   margin-bottom: 7px;
   font-size: 14px;
+}
+
+.motionButton {
+  min-width: 25px;
+  margin-left: 5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: #bbb;
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+.motionButton.active {
+  border-color: #8d79ff;
+  background: #493d8b;
+  color: #fff;
 }
 
 output { color: #aaa; }
@@ -268,3 +285,58 @@ button:disabled {
   flex-wrap: wrap;
   margin: 10px 0 6px;
 }
+
+.motionEditor {
+  position: fixed;
+  z-index: 10;
+  width: min(320px, calc(100vw - 16px));
+  margin: 0;
+  padding: 14px;
+  border: 1px solid #554a93;
+  border-radius: 9px;
+  background: #211e31;
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.25);
+}
+
+.motionEditor[hidden] { display: none; }
+
+.motionEditorHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.motionEditorHeader button {
+  padding: 2px 8px;
+  font-size: 18px;
+}
+
+.motionEditor fieldset {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid #4a465a;
+  border-radius: 6px;
+}
+
+.motionEditor legend { color: #bbb; font-size: 12px; }
+
+.motionEditor fieldset label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.motionBaseDescription {
+  margin: 12px 0 0;
+  color: #bbb;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.motionEditor .row { margin: 12px 0 0; }

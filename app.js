@@ -37,6 +37,7 @@ uniform vec2 u_center;
 uniform float u_feedbackAmount;
 uniform float u_feedbackZoom;
 uniform float u_feedbackRotation;
+uniform float u_hue;
 
 const float PI = 3.141592653589793;
 const float TAU = 6.283185307179586;
@@ -80,6 +81,18 @@ vec3 sampleKaleidoscope(vec2 uv) {
   return texture(u_image, q).rgb;
 }
 
+vec3 hueShift(vec3 color, float hue) {
+  float angle = hue * TAU;
+  float c = cos(angle);
+  float s = sin(angle);
+  mat3 rotation = mat3(
+    0.299 + 0.701 * c + 0.168 * s, 0.587 - 0.587 * c + 0.330 * s, 0.114 - 0.114 * c - 0.497 * s,
+    0.299 - 0.299 * c - 0.328 * s, 0.587 + 0.413 * c + 0.035 * s, 0.114 - 0.114 * c + 0.292 * s,
+    0.299 - 0.300 * c + 1.250 * s, 0.587 - 0.588 * c - 1.050 * s, 0.114 + 0.886 * c - 0.203 * s
+  );
+  return clamp(rotation * color, 0.0, 1.0);
+}
+
 void main() {
   vec3 fresh = sampleKaleidoscope(v_uv);
 
@@ -94,6 +107,7 @@ void main() {
   vec3 prev = texture(u_prev, feedbackUV).rgb;
 
   vec3 color = mix(fresh, prev, u_feedbackAmount);
+  color = hueShift(color, u_hue);
   outColor = vec4(color, 1.0);
 }
 `;
@@ -157,7 +171,8 @@ const feedbackUniforms = getUniforms(feedbackProgram, [
   "u_center",
   "u_feedbackAmount",
   "u_feedbackZoom",
-  "u_feedbackRotation"
+  "u_feedbackRotation",
+  "u_hue"
 ]);
 
 const blitUniforms = getUniforms(blitProgram, ["u_tex"]);
@@ -517,6 +532,18 @@ const state = {
   bloomStrength: 0.0,
   bloomThreshold: 0.60,
   bloomRadius: 1.5,
+  hue: 0.0,
+  motion: {
+    zoom: { source: "none", speed: 0.15, amount: 0.15, phase: 0.0 },
+    rotationDeg: { source: "none", speed: 0.10, amount: 20, phase: 0.0 },
+    panX: { source: "none", speed: 0.12, amount: 0.12, phase: 0.0 },
+    panY: { source: "none", speed: 0.12, amount: 0.12, phase: 0.25 },
+    driftX: { source: "none", speed: 0.10, amount: 0.01, phase: 0.0 },
+    driftY: { source: "none", speed: 0.10, amount: 0.01, phase: 0.25 },
+    feedbackAmount: { source: "none", speed: 0.05, amount: 0.15, phase: 0.0 },
+    hue: { source: "none", speed: 0.04, amount: 0.35, phase: 0.0 },
+    segments: { source: "none", speed: 0.08, amount: 6, phase: 0.0 }
+  },
   currentTime: 0.0,
   playing: false
 };
@@ -572,6 +599,8 @@ function workspaceSnapshot() {
       bloomStrength: state.bloomStrength,
       bloomThreshold: state.bloomThreshold,
       bloomRadius: state.bloomRadius,
+      hue: state.hue,
+      motion: state.motion,
       currentTime: state.currentTime,
       playing: state.playing
     },
@@ -626,7 +655,7 @@ function restoreWorkspaceSettings() {
     "centerX", "centerY", "speedDeg", "driftX", "driftY",
     "driftSpeed", "pulseAmount", "pulseSpeed", "feedbackAmount",
     "feedbackZoom", "feedbackRotateDeg", "bloomStrength", "bloomThreshold",
-    "bloomRadius", "currentTime"
+    "bloomRadius", "hue", "currentTime"
   ];
 
   for (const key of numericKeys) {
@@ -642,6 +671,8 @@ function restoreWorkspaceSettings() {
   if (["linear", "oscillate", "orbit", "smoothRandom"].includes(s.driftMode)) {
     state.driftMode = s.driftMode;
   }
+
+  restoreMotionSettings(s.motion);
 
   setValue("segments", state.segments);
   setValue("zoom", state.zoom);
@@ -659,9 +690,11 @@ function restoreWorkspaceSettings() {
   setValue("feedbackAmount", state.feedbackAmount);
   setValue("feedbackZoom", state.feedbackZoom);
   setValue("feedbackRotate", state.feedbackRotateDeg);
+  setValue("hue", state.hue);
   syncBloomControl("bloomStrength", "bloomStrength", state.bloomStrength);
   syncBloomControl("bloomThreshold", "bloomThreshold", state.bloomThreshold);
   syncBloomControl("bloomRadius", "bloomRadius", state.bloomRadius);
+  syncMotionButtons();
 
   $("mirror").checked = state.mirror;
   $("animate").checked = state.animate;
@@ -927,6 +960,144 @@ bindRange("pulseSpeed", "pulseSpeed", v => `${v.toFixed(2)} Hz`);
 bindRange("feedbackAmount", "feedbackAmount", v => v.toFixed(2));
 bindRange("feedbackZoom", "feedbackZoom", v => v.toFixed(3));
 bindRange("feedbackRotate", "feedbackRotateDeg", v => `${v.toFixed(2)}°`);
+bindRange("hue", "hue", v => v.toFixed(2));
+
+const motionMetadata = {
+  zoom: { label: "Zoom", amountMin: 0, amountMax: 0.75, amountStep: 0.01 },
+  rotationDeg: { label: "Rotation", amountMin: 0, amountMax: 180, amountStep: 1 },
+  panX: { label: "Pan X", amountMin: 0, amountMax: 0.5, amountStep: 0.005 },
+  panY: { label: "Pan Y", amountMin: 0, amountMax: 0.5, amountStep: 0.005 },
+  driftX: { label: "Drift X", amountMin: 0, amountMax: 0.08, amountStep: 0.001 },
+  driftY: { label: "Drift Y", amountMin: 0, amountMax: 0.08, amountStep: 0.001 },
+  feedbackAmount: { label: "Feedback amount", amountMin: 0, amountMax: 0.98, amountStep: 0.01 },
+  hue: { label: "Hue", amountMin: 0, amountMax: 1, amountStep: 0.01 },
+  segments: { label: "Segments", amountMin: 0, amountMax: 16, amountStep: 1 }
+};
+let motionEditorTarget = null;
+
+function formatMotionAmount(key, value) {
+  return key === "rotationDeg" ? `${value.toFixed(0)}°` : value.toFixed(2);
+}
+
+function motionBaseDescription(key, motion) {
+  const baseValue = formatMotionAmount(key, state[key]);
+  if (key === "driftX" || key === "driftY") {
+    if (motion.source !== "none") {
+      return `Base drift amplitude: ${baseValue}. This source adds a bounded offset of ±${formatMotionAmount(key, motion.amount)}.`;
+    }
+    return `Base drift amplitude: ${baseValue}. Drift mode and Drift speed move this base; modulation is currently off.`;
+  }
+
+  if (motion.source !== "none") {
+    return `Base value: ${baseValue}. This source varies it by ±${formatMotionAmount(key, motion.amount)}.`;
+  }
+
+  return `Base value: ${baseValue}. Modulation is currently off.`;
+}
+
+function previewMotionChange() {
+  previewSceneChange();
+}
+
+function syncMotionEditor() {
+  if (!motionEditorTarget) return;
+  const key = motionEditorTarget;
+  const motion = state.motion[key];
+  const meta = motionMetadata[key];
+  $("motionTargetName").textContent = meta.label;
+  $("motionAmount").min = String(meta.amountMin);
+  $("motionAmount").max = String(meta.amountMax);
+  $("motionAmount").step = String(meta.amountStep);
+  $("motionSpeed").value = String(motion.speed);
+  $("motionAmount").value = String(motion.amount);
+  $("motionPhase").value = String(motion.phase);
+  $("motionSpeedOut").value = `${motion.speed.toFixed(2)} Hz`;
+  $("motionAmountOut").value = formatMotionAmount(key, motion.amount);
+  $("motionPhaseOut").value = motion.phase.toFixed(2);
+  const selected = document.querySelector(`input[name="motionSource"][value="${motion.source}"]`);
+  if (selected) selected.checked = true;
+  $("motionBaseDescription").textContent = motionBaseDescription(key, motion);
+  $("motionSourceControls").hidden = motion.source === "none";
+  syncMotionButtons();
+}
+
+function syncMotionButtons() {
+  document.querySelectorAll(".motionButton").forEach(button => {
+    button.classList.toggle("active", state.motion[button.dataset.motion].source !== "none");
+  });
+}
+
+function positionMotionEditor(button) {
+  const editor = $("motionEditor");
+  const anchor = button.getBoundingClientRect();
+  const margin = 8;
+  const width = editor.offsetWidth;
+  const height = editor.offsetHeight;
+  const left = Math.min(window.innerWidth - width - margin, Math.max(margin, anchor.left));
+  let top = anchor.bottom + margin;
+
+  // If there is not enough room below the control, keep the popover adjacent
+  // by placing it immediately above instead.
+  if (top + height > window.innerHeight - margin) {
+    top = Math.max(margin, anchor.top - height - margin);
+  }
+
+  editor.style.left = `${left}px`;
+  editor.style.top = `${top}px`;
+}
+
+function openMotionEditor(key, button) {
+  if (!motionMetadata[key]) return;
+  motionEditorTarget = key;
+  $("motionEditor").hidden = false;
+  syncMotionEditor();
+  positionMotionEditor(button);
+}
+
+document.querySelectorAll(".motionButton").forEach(button => {
+  button.addEventListener("click", () => openMotionEditor(button.dataset.motion, button));
+});
+
+$("closeMotionEditor").addEventListener("click", () => {
+  $("motionEditor").hidden = true;
+  motionEditorTarget = null;
+});
+
+function dismissMotionEditorFromOutside(event) {
+  const editor = $("motionEditor");
+  if (editor.hidden || editor.contains(event.target) || event.target.closest(".motionButton")) return;
+  editor.hidden = true;
+  motionEditorTarget = null;
+}
+
+// Capture pointer input before the canvas/timeline handlers claim it. This is
+// more reliable than waiting for a synthetic click after a drag interaction.
+document.addEventListener("pointerdown", dismissMotionEditorFromOutside, true);
+document.addEventListener("click", dismissMotionEditorFromOutside, true);
+window.addEventListener("resize", () => { $("motionEditor").hidden = true; });
+document.addEventListener("scroll", () => { $("motionEditor").hidden = true; }, true);
+
+document.querySelectorAll('input[name="motionSource"]').forEach(input => {
+  input.addEventListener("change", () => {
+    if (!motionEditorTarget || !input.checked) return;
+    state.motion[motionEditorTarget].source = input.value;
+    syncMotionEditor();
+    previewMotionChange();
+  });
+});
+
+function bindMotionEditorRange(id, field) {
+  $(id).addEventListener("input", event => {
+    if (!motionEditorTarget) return;
+    state.motion[motionEditorTarget][field] = Number(event.target.value);
+    syncMotionEditor();
+    previewMotionChange();
+  });
+}
+
+bindMotionEditorRange("motionSpeed", "speed");
+bindMotionEditorRange("motionAmount", "amount");
+bindMotionEditorRange("motionPhase", "phase");
 
 function syncBloomControl(id, key, value, render = false) {
   const input = $(id);
@@ -1360,9 +1531,11 @@ $("reset").addEventListener("click", () => {
   setValue("feedbackAmount", state.feedbackAmount);
   setValue("feedbackZoom", state.feedbackZoom);
   setValue("feedbackRotate", state.feedbackRotateDeg);
+  setValue("hue", state.hue);
   syncBloomControl("bloomStrength", "bloomStrength", state.bloomStrength);
   syncBloomControl("bloomThreshold", "bloomThreshold", state.bloomThreshold);
   syncBloomControl("bloomRadius", "bloomRadius", state.bloomRadius);
+  syncMotionButtons();
 
   $("mirror").checked = state.mirror;
   $("animate").checked = state.animate;
@@ -1585,46 +1758,105 @@ function smoothNoiseSigned(t, seed) {
   return lerp(a, b, u);
 }
 
+const MOTION_SOURCES = new Set(["none", "sine", "triangle", "smoothRandom", "ramp", "steps"]);
+
+function restoreMotionSettings(savedMotion) {
+  if (!savedMotion || typeof savedMotion !== "object") return;
+
+  for (const [key] of Object.entries(defaults.motion)) {
+    const saved = savedMotion[key];
+    if (!saved || typeof saved !== "object") continue;
+    const target = state.motion[key];
+    if (MOTION_SOURCES.has(saved.source)) target.source = saved.source;
+    for (const field of ["speed", "amount", "phase"]) {
+      if (Number.isFinite(Number(saved[field]))) target[field] = Number(saved[field]);
+    }
+  }
+}
+
+function motionWave(source, cycles, seed) {
+  switch (source) {
+    case "sine":
+      return Math.sin(TAU * cycles);
+    case "triangle":
+      return 1.0 - 4.0 * Math.abs(fract(cycles) - 0.5);
+    case "smoothRandom":
+      return smoothNoiseSigned(cycles, seed);
+    case "ramp":
+      return fract(cycles) * 2.0 - 1.0;
+    case "steps":
+      return Math.round((fract(cycles) * 2.0 - 1.0) * 3.0) / 3.0;
+    default:
+      return 0.0;
+  }
+}
+
+function applyMotion(key, base, t) {
+  if (!state.animate) return base;
+  const motion = state.motion[key];
+  if (!motion || motion.source === "none") return base;
+  const seed = [...key].reduce((sum, char) => sum + char.charCodeAt(0), 0);
+  const cycles = t * Math.max(0, motion.speed) + motion.phase;
+  return base + motionWave(motion.source, cycles, seed) * motion.amount;
+}
+
+function motionOffset(key, t) {
+  return applyMotion(key, 0.0, t);
+}
+
 function computeDriftOffsetsAtTime(t) {
   if (!state.animate) {
     return { x: 0.0, y: 0.0 };
   }
 
+  const driftX = state.driftX;
+  const driftY = state.driftY;
+  let base;
+
   switch (state.driftMode) {
     case "linear":
-      return {
-        x: state.driftX * t,
-        y: state.driftY * t
+      base = {
+        x: driftX * t,
+        y: driftY * t
       };
+      break;
 
     case "oscillate": {
       const phase = TAU * state.driftSpeed * t;
       const wave = Math.sin(phase);
-      return {
-        x: state.driftX * wave,
-        y: state.driftY * wave
+      base = {
+        x: driftX * wave,
+        y: driftY * wave
       };
+      break;
     }
 
     case "orbit": {
       const phase = TAU * state.driftSpeed * t;
-      return {
-        x: state.driftX * Math.cos(phase),
-        y: state.driftY * Math.sin(phase)
+      base = {
+        x: driftX * Math.cos(phase),
+        y: driftY * Math.sin(phase)
       };
+      break;
     }
 
     case "smoothRandom": {
       const freq = Math.max(0.02, state.driftSpeed);
-      return {
-        x: state.driftX * smoothNoiseSigned(t * freq * 1.15 + 2.71, 17.13),
-        y: state.driftY * smoothNoiseSigned(t * freq * 0.93 + 9.42, 47.77)
+      base = {
+        x: driftX * smoothNoiseSigned(t * freq * 1.15 + 2.71, 17.13),
+        y: driftY * smoothNoiseSigned(t * freq * 0.93 + 9.42, 47.77)
       };
+      break;
     }
 
     default:
-      return { x: 0.0, y: 0.0 };
+      base = { x: 0.0, y: 0.0 };
   }
+
+  return {
+    x: base.x + motionOffset("driftX", t),
+    y: base.y + motionOffset("driftY", t)
+  };
 }
 
 function computeDynamicAtTime(t) {
@@ -1638,10 +1870,13 @@ function computeDynamicAtTime(t) {
     : state.rotationDeg;
 
   return {
-    zoom: Math.max(0.2, state.zoom * (1.0 + pulse)),
-    rotationRad: rotationDeg * Math.PI / 180.0,
-    panX: state.panX + drift.x,
-    panY: state.panY + drift.y
+    zoom: Math.max(0.2, applyMotion("zoom", state.zoom * (1.0 + pulse), t)),
+    rotationRad: applyMotion("rotationDeg", rotationDeg, t) * Math.PI / 180.0,
+    panX: applyMotion("panX", state.panX + drift.x, t),
+    panY: applyMotion("panY", state.panY + drift.y, t),
+    segments: Math.max(2, Math.round(applyMotion("segments", state.segments, t))),
+    feedbackAmount: Math.min(0.98, Math.max(0, applyMotion("feedbackAmount", state.feedbackAmount, t))),
+    hue: fract(applyMotion("hue", state.hue, t))
   };
 }
 
@@ -1671,18 +1906,19 @@ function drawFeedbackPass(dynamic) {
     imageResolution[0],
     imageResolution[1]
   );
-  gl.uniform1f(feedbackUniforms.u_segments, state.segments);
+  gl.uniform1f(feedbackUniforms.u_segments, dynamic.segments);
   gl.uniform1i(feedbackUniforms.u_mirror, state.mirror ? 1 : 0);
   gl.uniform1f(feedbackUniforms.u_zoom, dynamic.zoom);
   gl.uniform1f(feedbackUniforms.u_rotation, dynamic.rotationRad);
   gl.uniform2f(feedbackUniforms.u_pan, dynamic.panX, dynamic.panY);
   gl.uniform2f(feedbackUniforms.u_center, state.centerX, state.centerY);
-  gl.uniform1f(feedbackUniforms.u_feedbackAmount, state.feedbackAmount);
+  gl.uniform1f(feedbackUniforms.u_feedbackAmount, dynamic.feedbackAmount);
   gl.uniform1f(feedbackUniforms.u_feedbackZoom, state.feedbackZoom);
   gl.uniform1f(
     feedbackUniforms.u_feedbackRotation,
     state.feedbackRotateDeg * Math.PI / 180.0
   );
+  gl.uniform1f(feedbackUniforms.u_hue, dynamic.hue);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 }
 
@@ -1729,7 +1965,7 @@ function seekToTime(targetTime) {
 
   // Without feedback, each frame depends only on the source image and the
   // controls at this exact time. Replaying prior frames is unnecessary.
-  if (finalTime <= 0 || state.feedbackAmount <= 0) {
+  if (finalTime <= 0 || (state.feedbackAmount <= 0 && state.motion.feedbackAmount.source === "none")) {
     drawSimulationStepAtTime(finalTime);
     presentCurrentFrame();
     sceneDirty = false;
