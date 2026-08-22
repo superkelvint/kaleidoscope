@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Kaleidoscope v0.10</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main>
+    <section class="stage">
+      <canvas id="gl"></canvas>
+      <div id="dropHint">Drop an image here</div>
+    </section>
+
+    <aside class="controls">
+      <h1>Kaleidoscope v0.10</h1>
+
+      <label class="file">
+        <span>Source image</span>
+        <input id="file" type="file" accept="image/*" />
+      </label>
+      <div id="persistenceStatus" class="recordingStatus">Local workspace save enabled.</div>
+
+      <div class="presetGroup">
+        <div class="subhead">Presets</div>
+        <div class="presetButtons">
+          <button class="preset" data-preset="flower">Flower</button>
+          <button class="preset" data-preset="crystal">Crystal</button>
+          <button class="preset" data-preset="tunnel">Tunnel</button>
+        </div>
+      </div>
+
+      <div class="subhead">Symmetry</div>
+
+      <div class="row">
+        <label>
+          Segments
+          <output id="segmentsOut">12</output>
+        </label>
+        <div class="rangeLine">
+          <input id="segments" type="range" min="2" max="32" step="1" value="12" />
+          <input id="segmentsNum" class="num" type="number" min="2" max="32" step="1" value="12" />
+        </div>
+      </div>
+
+      <label class="check">
+        <input id="mirror" type="checkbox" checked />
+        Mirror alternate wedges
+      </label>
+
+      <div class="row">
+        <label>Zoom <output id="zoomOut">1.00</output></label>
+        <div class="rangeLine">
+          <input id="zoom" type="range" min="0.2" max="5" step="0.01" value="1" />
+          <input id="zoomNum" class="num" type="number" min="0.2" max="5" step="0.01" value="1" />
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Rotation <output id="rotationOut">0.0°</output></label>
+        <div class="rangeLine">
+          <input id="rotation" type="range" min="-180" max="180" step="0.1" value="0" />
+          <input id="rotationNum" class="num" type="number" min="-180" max="180" step="0.1" value="0" />
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Pan X <output id="panXOut">0.00</output></label>
+        <div class="rangeLine">
+          <input id="panX" type="range" min="-1" max="1" step="0.001" value="0" />
+          <input id="panXNum" class="num" type="number" min="-1" max="1" step="0.001" value="0" />
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Pan Y <output id="panYOut">0.00</output></label>
+        <div class="rangeLine">
+          <input id="panY" type="range" min="-1" max="1" step="0.001" value="0" />
+          <input id="panYNum" class="num" type="number" min="-1" max="1" step="0.001" value="0" />
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Center X <output id="centerXOut">0.50</output></label>
+        <div class="rangeLine">
+          <input id="centerX" type="range" min="0" max="1" step="0.001" value="0.5" />
+          <input id="centerXNum" class="num" type="number" min="0" max="1" step="0.001" value="0.5" />
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Center Y <output id="centerYOut">0.50</output></label>
+        <div class="rangeLine">
+          <input id="centerY" type="range" min="0" max="1" step="0.001" value="0.5" />
+          <input id="centerYNum" class="num" type="number" min="0" max="1" step="0.001" value="0.5" />
+        </div>
+      </div>
+
+      <hr />
+
+      <div class="subhead">Motion</div>
+
+      <label class="check">
+        <input id="animate" type="checkbox" checked />
+        Enable motion
+      </label>
+
+      <div class="row">
+        <label>Rotate speed <output id="speedOut">4.0°/s</output></label>
+        <div class="rangeLine">
+          <input id="speed" type="range" min="-30" max="30" step="0.1" value="4" />
+          <input id="speedNum" class="num" type="number" min="-30" max="30" step="0.1" value="4" />
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Drift X <output id="driftXOut">0.00</output></label>
+        <div class="rangeLine">
+          <input id="driftX" type="range" min="-0.25" max="0.25" step="0.001" value="0.00" />
+          <input id="driftXNum" class="num" type="number" min="-0.25" max="0.25" step="0.001" value="0.00" />
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Drift Y <output id="driftYOut">0.00</output></label>
+        <div class="rangeLine">
+          <input id="driftY" type="range" min="-0.25" max="0.25" step="0.001" value="0.00" />
+          <input id="driftYNum" class="num" type="number" min="-0.25" max="0.25" step="0.001" value="0.00" />
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Drift mode</label>
+        <select id="driftMode" class="select">
+          <option value="linear">Linear</option>
+          <option value="oscillate">Oscillate</option>
+          <option value="orbit">Orbit</option>
+          <option value="smoothRandom">Smooth random</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label>Drift speed <output id="driftSpeedOut">0.20 Hz</output></label>
+        <div class="rangeLine">
+          <input id="driftSpeed" type="range" min="0.02" max="2.0" step="0.01" value="0.20" />
+          <input id="driftSpeedNum" class="num" type="number" min="0.02" max="2.0" step="0.01" value="0.20" />
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Pulse amount <output id="pulseAmountOut">0.00</output></label>
+        <div class="rangeLine">
+          <input id="pulseAmount" type="range" min="0" max="0.5" step="0.001" value="0.00" />
+          <input id="pulseAmountNum" class="num" type="number" min="0" max="0.5" step="0.001" value="0.00" />
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Pulse speed <output id="pulseSpeedOut">0.20 Hz</output></label>
+        <div class="rangeLine">
+          <input id="pulseSpeed" type="range" min="0.02" max="2.0" step="0.01" value="0.20" />
+          <input id="pulseSpeedNum" class="num" type="number" min="0.02" max="2.0" step="0.01" value="0.20" />
+        </div>
+      </div>
+
+      <hr />
+
+      <div class="subhead">Feedback Trails</div>
+
+      <div class="row">
+        <label>Feedback amount <output id="feedbackAmountOut">0.00</output></label>
+        <div class="rangeLine">
+          <input id="feedbackAmount" type="range" min="0" max="0.98" step="0.001" value="0.00" />
+          <input id="feedbackAmountNum" class="num" type="number" min="0" max="0.98" step="0.001" value="0.00" />
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Feedback zoom <output id="feedbackZoomOut">1.000</output></label>
+        <div class="rangeLine">
+          <input id="feedbackZoom" type="range" min="0.95" max="1.05" step="0.0005" value="1.000" />
+          <input id="feedbackZoomNum" class="num" type="number" min="0.95" max="1.05" step="0.0005" value="1.000" />
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Feedback rotate <output id="feedbackRotateOut">0.00°</output></label>
+        <div class="rangeLine">
+          <input id="feedbackRotate" type="range" min="-5" max="5" step="0.01" value="0.00" />
+          <input id="feedbackRotateNum" class="num" type="number" min="-5" max="5" step="0.01" value="0.00" />
+        </div>
+      </div>
+
+      <hr />
+
+      <div class="subhead">Bloom</div>
+
+      <div class="row">
+        <label for="bloomStrength">Bloom</label>
+        <input id="bloomStrength" type="range" min="0" max="2" step="0.01" value="0"
+          aria-label="Bloom strength" />
+      </div>
+
+      <div class="row">
+        <label for="bloomThreshold">Threshold</label>
+        <input id="bloomThreshold" type="range" min="0" max="1" step="0.01" value="0.60"
+          aria-label="Bloom threshold" />
+      </div>
+
+      <div class="row">
+        <label for="bloomRadius">Glow size</label>
+        <input id="bloomRadius" type="range" min="0.5" max="3" step="0.05" value="1.5"
+          aria-label="Bloom glow size, from small to large" />
+      </div>
+
+      <hr />
+
+      <div class="subhead">Timeline</div>
+
+      <div class="row">
+        <label>Time <output id="timelineOut">0.00 s</output></label>
+        <div class="rangeLine">
+          <div id="timeline" class="timelineScroller" role="slider" tabindex="0"
+            aria-label="Timeline" aria-valuetext="0.00 seconds">
+            <div id="timelineTicks" class="timelineTicks"></div>
+            <div class="timelinePlayhead" aria-hidden="true"></div>
+          </div>
+          <input id="timelineNum" class="num" type="number" step="0.01" value="0" />
+        </div>
+      </div>
+
+      <div class="playbackButtons">
+        <button id="stepBack">◀ 1s</button>
+        <button id="playPause">Play</button>
+        <button id="stepForward">1s ▶</button>
+      </div>
+
+      <hr />
+
+      <div class="subhead">Recording</div>
+
+      <div class="row">
+        <label>Frame rate</label>
+        <select id="recordFps" class="select">
+          <option value="30">30 fps</option>
+          <option value="60" selected>60 fps</option>
+        </select>
+      </div>
+
+      <div class="recordingButtons">
+        <button id="startRecording">Start recording</button>
+        <button id="stopRecording" disabled>Stop</button>
+      </div>
+
+      <div id="recordingStatus" class="recordingStatus">Ready to record.</div>
+
+      <div class="buttons">
+        <button id="clearFeedback">Clear trails</button>
+        <button id="reset">Reset</button>
+        <button id="save">Save PNG</button>
+      </div>
+
+      <p class="hint">
+        Tip: drag directly on the canvas to pan the source image. Use the mouse wheel to zoom.
+        Use the timeline slider to revisit a beautiful moment exactly. Recording still prefers MP4/H.264 when supported and falls back to WebM otherwise.
+      </p>
+    </aside>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
