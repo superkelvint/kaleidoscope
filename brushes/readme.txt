@@ -1,0 +1,3 @@
+Wootha released his Photoshop brushes into the PUBLIC DOMAIN and people are free to do whatever they want with it. The brushes are in two .ABR files with one .TPL. A total of 684.8MB. Unfortunately, I don’t have access to Photoshop to extract all the brush tips. I took what I could through GIMP for my own use, but also making them available for those that want to add them to their collection.
+
+artscroll@pm.me

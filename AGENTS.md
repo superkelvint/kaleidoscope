@@ -11,6 +11,8 @@ and task-specific plans elsewhere.
 | UI/control wiring                     | `app.js`, then the relevant HTML               |
 | Rendering, animation, feedback, bloom | `render.js`                                    |
 | Bitmap loading/persistence            | `bitmap-source.js`                             |
+| Basic drawing source                  | `drawing-source.js`, then `app.js`             |
+| Canvas2D brush rendering              | `brushes.js`                                   |
 | Global wallpaper symmetry             | `global-wallpaper.js`                          |
 | New source type                       | source contract below, then `bitmap-source.js` |
 | Canvas gestures                       | `app.js`; transforms stay in `Renderer`        |
@@ -39,6 +41,22 @@ renderer internals.
 Exports `BitmapSource`; owns validation/decoding, current image
 pixels/dimensions, monotonic frame revision, IndexedDB persistence, and legacy
 source-image migration. It must remain WebGL-free.
+
+### `drawing-source.js` — drawing source
+
+Exports `DrawingSource`; owns its offscreen Canvas2D surface, brush settings,
+stroke interpolation, and frame revision. It remains WebGL-free and maps each
+pointer-space stroke sample to one source coordinate using the effective mapping
+state supplied by `Renderer`. Global wallpaper pointer mapping is not supported
+until it can match `global-wallpaper.js` exactly; `app.js` temporarily switches
+to `single` while Draw mode is active and restores the prior bitmap grid mode
+when returning to Image mode.
+
+### `brushes.js` — brush rendering
+
+Exports Canvas2D-only brush implementations. Brushes receive mapped source
+coordinates and paint options; they must not depend on pointer events, source
+revisions, renderer state, WebGL, or symmetry mapping.
 
 ### `app.js` — orchestration/UI
 

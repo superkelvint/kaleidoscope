@@ -22,14 +22,31 @@ main {
   background: radial-gradient(circle at center, #242424 0%, #111 70%);
 }
 
-canvas {
+#gl {
   display: block;
   width: 100%;
   height: 100%;
   cursor: grab;
+  touch-action: none;
 }
 
-canvas:active { cursor: grabbing; }
+#gl:active { cursor: grabbing; }
+
+#wedgeGuides {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+#drawingGuides {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
 
 #dropHint {
   position: absolute;
@@ -172,6 +189,18 @@ hr {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.sourceButtons {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.sourceButtons button.active {
+  border-color: #8d79ff;
+  background: #493d8b;
+  color: #fff;
 }
 
 button {
@@ -322,6 +351,89 @@ button:disabled {
   opacity: 0.45;
   cursor: default;
 }
+
+.currentBrushTip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.currentBrushTip canvas {
+  width: 64px;
+  height: 64px;
+  border: 1px solid #5b5374;
+  border-radius: 6px;
+  background: #e4e1ed;
+}
+
+.currentBrushTip strong { font-size: 13px; }
+
+.textureRotation {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 14px 0;
+  padding: 9px;
+  border: 1px solid #444;
+  border-radius: 6px;
+}
+
+.textureRotation legend { padding: 0 4px; color: #bbb; font-size: 12px; }
+.textureRotation label { display: flex; gap: 5px; align-items: center; font-size: 13px; }
+
+.brushBrowser {
+  width: min(720px, calc(100vw - 28px));
+  max-height: min(760px, calc(100vh - 28px));
+  padding: 16px;
+  overflow: auto;
+  color: #eee;
+  border: 1px solid #6252ad;
+  border-radius: 10px;
+  background: #211e31;
+  box-shadow: 0 16px 50px rgba(0, 0, 0, .65);
+}
+
+.brushBrowser::backdrop { background: rgba(0, 0, 0, .65); }
+
+.brushBrowserHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.brushBrowserHeader h2 { margin: 0; font-size: 18px; }
+.brushBrowserHeader button { padding: 2px 9px; font-size: 20px; }
+.brushSearch { display: block; margin-bottom: 7px; color: #bbb; font-size: 12px; }
+
+.brushBrowserGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  gap: 9px;
+  margin-top: 14px;
+}
+
+.brushTile {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 7px;
+  text-align: center;
+  font-size: 11px;
+}
+
+.brushTile canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 4px;
+  background: #e4e1ed;
+}
+
+.brushTile.selected { border-color: #a895ff; background: #493d8b; box-shadow: inset 0 0 0 1px #d2c9ff; }
+.brushTile.unavailable { text-decoration: line-through; }
+.brushBrowserFooter { display: flex; justify-content: flex-end; margin-top: 14px; }
 
 
 .playbackButtons {

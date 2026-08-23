@@ -10,16 +10,133 @@
   <main>
     <section class="stage">
       <canvas id="gl"></canvas>
+      <canvas id="wedgeGuides" aria-hidden="true"></canvas>
+      <canvas id="drawingGuides" aria-hidden="true"></canvas>
       <div id="dropHint">Drop an image here</div>
     </section>
 
     <aside class="controls">
       <h1>Kaleidoscope v0.10</h1>
 
-      <label class="file">
-        <span>Source image</span>
-        <input id="file" type="file" accept="image/*" />
-      </label>
+      <div class="subhead">Source</div>
+      <div class="sourceButtons" role="group" aria-label="Source mode">
+        <button id="sourceImage" class="active" type="button" aria-pressed="true">Image</button>
+        <button id="sourceDrawing" type="button" aria-pressed="false">Draw</button>
+      </div>
+      <div id="bitmapControls">
+        <label class="file">
+          <span>Source image</span>
+          <input id="file" type="file" accept="image/*" />
+        </label>
+      </div>
+      <div id="drawingControls" hidden>
+        <div class="row">
+          <label for="drawingBackgroundColor">Canvas background</label>
+          <input id="drawingBackgroundColor" type="color" value="#000000" />
+        </div>
+        <details id="drawingBrushSection" class="controlSection" open>
+          <summary>Brush</summary>
+        <div class="row">
+          <label for="drawingBrush">Brush</label>
+          <select id="drawingBrush" class="select">
+            <option value="pen" selected>Pen</option>
+            <option value="ribbon">Ribbon</option>
+            <option value="calligraphy">Calligraphy</option>
+            <option value="spray">Spray</option>
+            <option value="texture">Texture</option>
+            <option value="arc">Arc</option>
+            <option value="bezier">Bézier</option>
+          </select>
+        </div>
+        <div id="drawingColorModeControl" class="row">
+          <label for="drawingColorMode">Color</label>
+          <select id="drawingColorMode" class="select">
+            <option value="solid" selected>Solid</option>
+            <option value="gradient">Gradient</option>
+          </select>
+        </div>
+        <div id="drawingSolidColorControl" class="row">
+          <label for="drawingColor">Color</label>
+          <input id="drawingColor" type="color" value="#ffffff" />
+        </div>
+        <div id="drawingGradientColorControls" hidden>
+          <div class="row">
+            <label for="drawingGradientStartColor">Start color</label>
+            <input id="drawingGradientStartColor" type="color" value="#ffffff" />
+          </div>
+          <div class="row">
+            <label for="drawingGradientEndColor">End color</label>
+            <input id="drawingGradientEndColor" type="color" value="#ff4da6" />
+          </div>
+        </div>
+        <div class="row">
+          <label for="drawingSize">Size</label>
+          <input id="drawingSize" type="range" min="1" max="100" step="1" value="8" />
+        </div>
+        <div class="row">
+          <label for="drawingOpacity">Opacity</label>
+          <input id="drawingOpacity" type="range" min="0" max="1" step="0.01" value="0.85" />
+        </div>
+        <div class="row">
+          <div class="rowLabel">
+            <label for="drawingSmoothing">Smoothing</label>
+            <output id="drawingSmoothingOut">35%</output>
+          </div>
+          <input id="drawingSmoothing" type="range" min="0" max="100" step="1" value="35" />
+        </div>
+        <p class="drawingHint">Hold Ctrl while drawing freehand to lock onto the nearest wedge boundary.</p>
+        <div id="drawingRibbonControls" hidden>
+          <div class="row">
+            <label for="drawingLines">Lines</label>
+            <input id="drawingLines" type="range" min="1" max="20" step="1" value="5" />
+          </div>
+          <div class="row">
+            <label for="drawingSpan">Span</label>
+            <input id="drawingSpan" type="range" min="0" max="200" step="1" value="24" />
+          </div>
+        </div>
+        <div id="drawingCalligraphyControls" hidden>
+          <div class="row">
+            <label for="drawingNibRatio">Nib width</label>
+            <input id="drawingNibRatio" type="range" min="0.05" max="1" step="0.01" value="0.22" />
+          </div>
+        </div>
+        <div id="drawingSprayControls" hidden>
+          <div class="row">
+            <label for="drawingDensity">Density</label>
+            <input id="drawingDensity" type="range" min="1" max="100" step="1" value="24" />
+          </div>
+          <div class="row">
+            <label for="drawingParticleSize">Particle size</label>
+            <input id="drawingParticleSize" type="range" min="0.5" max="10" step="0.5" value="1.5" />
+          </div>
+        </div>
+        <div id="drawingTextureControls" hidden>
+          <div class="row">
+            <div class="rowLabel"><span>Brush Tip</span></div>
+            <div class="currentBrushTip">
+              <canvas id="drawingCurrentTexturePreview" width="96" height="96" aria-hidden="true"></canvas>
+              <div><strong id="drawingCurrentTextureName">Wootha Charcoal 021</strong><div id="drawingTextureStatus" class="recordingStatus"></div></div>
+            </div>
+            <button id="browseBrushes" type="button">Browse Brushes</button>
+          </div>
+          <div class="row">
+            <div class="rowLabel"><label for="drawingTextureSpacing">Spacing</label><output id="drawingTextureSpacingOut">0.25×</output></div>
+            <input id="drawingTextureSpacing" type="range" min="0.05" max="1" step="0.05" value="0.25" />
+          </div>
+          <fieldset class="textureRotation">
+            <legend>Rotation</legend>
+            <label><input type="radio" name="drawingTextureRotation" value="followStroke" checked /> Follow Stroke</label>
+            <label><input type="radio" name="drawingTextureRotation" value="fixed" /> Fixed</label>
+          </fieldset>
+        </div>
+        </details>
+        <div class="sourceButtons" role="group" aria-label="Drawing history">
+          <button id="undoDrawing" type="button" disabled>Undo</button>
+          <button id="redoDrawing" type="button" disabled>Redo</button>
+          <button id="clearDrawing" type="button">Clear Drawing</button>
+        </div>
+      </div>
       <div id="persistenceStatus" class="recordingStatus">Local workspace save enabled.</div>
 
       <div class="presetGroup" hidden>
@@ -65,6 +182,11 @@
       <label class="check">
         <input id="mirror" type="checkbox" checked />
         Mirror alternate wedges (Radial mode)
+      </label>
+
+      <label class="check">
+        <input id="showMirrorGuides" type="checkbox" />
+        Show mirror wedge guides
       </label>
 
       <div class="row">
@@ -131,6 +253,7 @@
         <div class="row">
           <label for="wallpaperMode">Grid layout</label>
           <select id="wallpaperMode" class="select">
+            <option value="single">Single motif</option>
             <option value="p6m" selected>p6m</option>
             <option value="p4m">p4m</option>
             <option value="p3m1">p3m1</option>
@@ -379,6 +502,16 @@
           <div class="row"><label>Phase <output id="motionPhaseOut"></output></label><input id="motionPhase" type="range" min="0" max="1" step="0.01" /></div>
         </div>
       </section>
+      <dialog id="brushBrowser" class="brushBrowser" aria-labelledby="brushBrowserTitle">
+        <div class="brushBrowserHeader">
+          <h2 id="brushBrowserTitle">Choose Brush</h2>
+          <button id="closeBrushBrowser" type="button" aria-label="Close brush browser">×</button>
+        </div>
+        <label class="brushSearch" for="brushBrowserSearch">Search brushes…</label>
+        <input id="brushBrowserSearch" class="select" type="search" placeholder="Search brushes…" autocomplete="off" />
+        <div id="brushBrowserGrid" class="brushBrowserGrid"></div>
+        <div class="brushBrowserFooter"><button id="closeBrushBrowserFooter" type="button">Close</button></div>
+      </dialog>
     </aside>
   </main>
 

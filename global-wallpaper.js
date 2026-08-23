@@ -54,6 +54,76 @@ export function globalWallpaperModeIndex(mode) {
   return index >= 0 ? index : 0;
 }
 
+// CPU counterpart of globalWallpaperPoint() below. Drawing input must use the
+// same group quotient as the fragment shader so a pointer lands on the source
+// pixel currently visible beneath it.
+const WALLPAPER_EPS = 0.000001;
+const SQRT3_OVER_2 = 0.8660254037844386;
+
+function wrap01(value) {
+  const wrapped = value - Math.floor(value);
+  return wrapped < WALLPAPER_EPS || wrapped > 1 - WALLPAPER_EPS ? 0 : wrapped;
+}
+
+function wrapPoint(point) { return { x: wrap01(point.x), y: wrap01(point.y) }; }
+function centeredPoint(point) {
+  let x = point.x + .5 - Math.floor(point.x + .5) - .5;
+  let y = point.y + .5 - Math.floor(point.y + .5) - .5;
+  if (Math.abs(x) < WALLPAPER_EPS) x = 0;
+  if (Math.abs(y) < WALLPAPER_EPS) y = 0;
+  return { x, y };
+}
+function lexLess(candidate, best) {
+  return candidate.x < best.x - WALLPAPER_EPS ||
+    (Math.abs(candidate.x - best.x) <= WALLPAPER_EPS && candidate.y < best.y - WALLPAPER_EPS);
+}
+function chooseCanonical(best, candidate) { candidate = wrapPoint(candidate); return lexLess(candidate, best) ? candidate : best; }
+function squareR4(point) { return { x: -point.y, y: point.x }; }
+function squareMirrorX(point) { return { x: point.x, y: -point.y }; }
+function squareP4GGlide(point) { return { x: point.x + .5, y: -point.y + .5 }; }
+function hexR3(point) { return { x: -point.y, y: point.x - point.y }; }
+function hexR6(point) { return { x: point.x - point.y, y: point.x }; }
+function hexM6(point) { return { x: point.x - point.y, y: -point.y }; }
+function hexM3Long(point) { return { x: point.x, y: point.x - point.y }; }
+function hexM3Short(point) { return { x: point.x - point.y, y: -point.y }; }
+
+function canonical(point, rotate, mirror, count) {
+  let best = wrapPoint(point), current = best;
+  for (let index = 0; index < count; index += 1) {
+    best = chooseCanonical(best, current);
+    if (mirror) best = chooseCanonical(best, mirror(current));
+    current = rotate(current);
+  }
+  return best;
+}
+
+/** Maps a canvas-space point to its exact global-wallpaper quotient. */
+export function globalWallpaperPoint(point, mode = "single", patternSize = .45) {
+  const modeIndex = typeof mode === "number" ? mode : globalWallpaperModeIndex(mode);
+  if (modeIndex === 0) return { x: point.x, y: point.y };
+  const spacing = Math.max(Number(patternSize) || 0, .02);
+  if ([1, 2, 5, 6, 7].includes(modeIndex)) {
+    const fractional = {
+      y: point.y / (SQRT3_OVER_2 * spacing),
+      x: point.x / spacing + .5 * point.y / (SQRT3_OVER_2 * spacing)
+    };
+    let value;
+    if (modeIndex === 1) value = canonical(fractional, hexR6, hexM6, 6);
+    else if (modeIndex === 2) value = canonical(fractional, hexR6, null, 6);
+    else if (modeIndex === 5) value = canonical(fractional, hexR3, hexM3Long, 3);
+    else if (modeIndex === 6) value = canonical(fractional, hexR3, null, 3);
+    else value = canonical(fractional, hexR3, hexM3Short, 3);
+    value = centeredPoint(value);
+    return { x: spacing * (value.x - .5 * value.y), y: spacing * SQRT3_OVER_2 * value.y };
+  }
+  if (modeIndex === 3 || modeIndex === 4) {
+    const fractional = { x: point.x / spacing, y: point.y / spacing };
+    const value = centeredPoint(canonical(fractional, squareR4, modeIndex === 3 ? squareMirrorX : squareP4GGlide, 4));
+    return { x: value.x * spacing, y: value.y * spacing };
+  }
+  return { x: point.x, y: point.y };
+}
+
 // GLSL injected into the main fragment shader.
 //
 // Coordinate contract:

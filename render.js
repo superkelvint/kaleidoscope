@@ -73,7 +73,18 @@ class BloomEffect {
 precision highp float;
 in vec2 v_uv; out vec4 outColor;
 uniform sampler2D u_scene; uniform float u_threshold;
-void main() { vec3 color=texture(u_scene,v_uv).rgb; float brightness=dot(color,vec3(.2126,.7152,.0722)); float contribution=smoothstep(u_threshold-.12,u_threshold+.12,brightness); outColor=vec4(color*contribution,1.); }`);
+void main() {
+  vec3 color=texture(u_scene,v_uv).rgb;
+  float brightness=max(max(color.r,color.g),color.b);
+  // Preserve the portion above the threshold instead of multiplying the
+  // entire source color by a narrow step. The old extraction made bloom from
+  // thin, bright drawing marks almost indistinguishable after downsampling.
+  float knee=.12;
+  float soft=clamp(brightness-u_threshold+knee,0.,2.*knee);
+  soft=soft*soft/max(4.*knee,.0001);
+  float extracted=max(brightness-u_threshold,soft);
+  outColor=vec4(color*extracted/max(brightness,.0001),1.);
+}`);
     this.blurProgram = createProgram(gl, VERTEX_SOURCE, `#version 300 es
 precision highp float;
 in vec2 v_uv; out vec4 outColor;
@@ -174,12 +185,13 @@ void main() { vec3 scene=texture(u_scene,v_uv).rgb; vec3 bloom=texture(u_bloom,v
 }
 
 export class Renderer {
-  constructor(canvas, { onStateChange = () => {}, onFrame = () => {} } = {}) {
+  constructor(canvas, { onStateChange = () => {}, onFrame = () => {}, onPresent = () => {} } = {}) {
     this.canvas = canvas;
     this.gl = canvas.getContext("webgl2", { antialias: true, preserveDrawingBuffer: true });
     if (!this.gl) throw new Error("WebGL2 is not supported by this browser.");
     this.onStateChange = onStateChange;
     this.onFrame = onFrame;
+    this.onPresent = onPresent;
     this.state = structuredClone(DEFAULT_STATE);
     this.source = null;
     this.uploadedSource = null;
@@ -213,6 +225,26 @@ export class Renderer {
   }
 
   getState() { return structuredClone(this.state); }
+  getCurrentMappingState() {
+    const dynamic = this.dynamic(this.state.currentTime);
+    return {
+      segments: dynamic.segments,
+      mirror: this.state.mirror,
+      symmetryMode: this.state.symmetryMode,
+      twist: dynamic.twist,
+      zoom: dynamic.zoom,
+      rotationRad: dynamic.rotationRad,
+      panX: dynamic.panX,
+      panY: dynamic.panY,
+      centerX: this.state.centerX,
+      centerY: this.state.centerY,
+      wallpaperMode: this.state.wallpaperMode,
+      wallpaperSize: this.state.wallpaperSize,
+      gridRotationDeg: this.state.gridRotationDeg,
+      gridX: this.state.gridX,
+      gridY: this.state.gridY
+    };
+  }
   restoreState(snapshot) { this.applySnapshot(snapshot); this.forceSceneRebuild(); this.emitState(); }
   updateState(patch, { preview = true } = {}) { this.applySnapshot(patch); preview ? this.preview() : this.forceSceneRebuild(); this.emitState(); }
   updatePostProcess(patch) { this.applySnapshot(patch); if (this.readTarget) this.present(); this.emitState(); }
@@ -380,6 +412,7 @@ export class Renderer {
     gl.bindTexture(gl.TEXTURE_2D, texture);
     gl.uniform1i(this.blitUniforms.u_tex, 0);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
+    this.onPresent();
   }
   rebuild() {
     this.clearFeedbackTargets();
