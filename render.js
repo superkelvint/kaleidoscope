@@ -1,4 +1,5 @@
 import { GLOBAL_WALLPAPER_GLSL, globalWallpaperModeIndex } from "./global-wallpaper.js";
+import { LOCAL_MOTIF_GLSL } from "./local-motif.js";
 
 const VERTEX_SOURCE = `#version 300 es
 layout(location = 0) in vec2 a_position;
@@ -15,19 +16,7 @@ uniform bool u_mirror; uniform int u_symmetryMode, u_wallpaperMode;
 const float PI = 3.141592653589793; const float TAU = 6.283185307179586;
 vec2 rotate2d(vec2 p, float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c) * p; }
 ${GLOBAL_WALLPAPER_GLSL}
-vec2 radialFold(vec2 p, bool mirror) { float r=length(p), a=atan(p.y,p.x), wedge=TAU/max(u_segments,2.0); a=mod(a+TAU,wedge); if(mirror) a=abs(a-wedge*.5); return vec2(cos(a),sin(a))*r; }
-vec2 twistPoint(vec2 p) { return rotate2d(p,length(p)*u_twist); }
-vec2 mirrorTile(vec2 p,float scale) { return abs(fract(p*scale)-.5)/scale; }
-float radialRing(vec2 p,float scale) { return floor(length(p)*max(2.0,scale*2.0)); }
-vec2 halfTurnTile(vec2 p,float scale) { return rotate2d(radialFold(p,true),mod(radialRing(p,scale),2.0)*PI); }
-vec2 quarterTurnTile(vec2 p,float scale) { return rotate2d(radialFold(p,true),mod(radialRing(p,scale),4.0)*PI*.5); }
-vec2 glideMirrorTile(vec2 p,float scale) { float wedge=TAU/max(u_segments,2.0), ring=radialRing(p,scale); vec2 q=radialFold(rotate2d(p,mod(ring,2.0)*wedge*.5),true); if(mod(ring,2.0)>.5)q=rotate2d(q,PI); return q; }
-vec2 localMotifPoint(vec2 p) { p=twistPoint(p); float scale=max(u_segments,2.0)*.25;
- if(u_symmetryMode==0)return radialFold(p,u_mirror); if(u_symmetryMode==1||u_symmetryMode==2)return radialFold(p,true);
- if(u_symmetryMode==3){vec2 q=radialFold(p,true);float rings=max(1.0,scale);return normalize(q+vec2(.00001,0.))*fract(length(q)*rings)/rings;}
- if(u_symmetryMode==4){vec2 q=p*scale;for(int i=0;i<3;i++){q=abs(q);q=rotate2d(q,PI/3.);q=fract(q*1.75)-.5;}return q/scale;}
- if(u_symmetryMode==5)return mirrorTile(p,scale); if(u_symmetryMode==6)return halfTurnTile(p,scale); if(u_symmetryMode==7)return quarterTurnTile(p,scale); if(u_symmetryMode==8)return glideMirrorTile(p,scale);
- if(u_symmetryMode==9){vec2 q=p*scale;q.x*=1.154700538;q.y+=mod(floor(q.x),2.)*.5;q=fract(q)-.5;q.x*=.866025404;return abs(q)/scale;} return mirrorTile(p,scale); }
+${LOCAL_MOTIF_GLSL}
 vec3 hueShift(vec3 color,float hue){float a=hue*TAU,c=cos(a),s=sin(a);mat3 r=mat3(.299+.701*c+.168*s,.587-.587*c+.330*s,.114-.114*c-.497*s,.299-.299*c-.328*s,.587+.413*c+.035*s,.114-.114*c+.292*s,.299-.300*c+1.250*s,.587-.588*c-1.050*s,.114+.886*c-.203*s);return clamp(r*color,0.,1.);}
 void main(){vec2 p=v_uv-u_center;float aspect=u_resolution.x/u_resolution.y;p.x*=aspect;vec2 grid=p;if(u_wallpaperMode!=0)grid=rotate2d(p-u_gridOffset,-u_gridRotation);vec2 q=localMotifPoint(globalWallpaperPoint(grid,u_wallpaperMode,u_wallpaperSize));q=rotate2d(q,u_rotation);q.x/=aspect;q/=max(u_zoom,.001);q+=u_pan+vec2(.5);float imageAspect=u_imageResolution.x/u_imageResolution.y;if(imageAspect>aspect)q.y=(q.y-.5)*(aspect/imageAspect)+.5;else q.x=(q.x-.5)*(imageAspect/aspect)+.5;vec3 fresh=texture(u_image,fract(q)).rgb;
  p=v_uv-u_center;p.x*=aspect;p=rotate2d(p,u_feedbackRotation);p/=max(u_feedbackZoom,.001);p.x/=aspect;vec3 prev=texture(u_prev,fract(p+u_center)).rgb;outColor=vec4(hueShift(mix(fresh,prev,u_feedbackAmount),u_hue),1.);}`;
@@ -185,11 +174,12 @@ void main() { vec3 scene=texture(u_scene,v_uv).rgb; vec3 bloom=texture(u_bloom,v
 }
 
 export class Renderer {
-  constructor(canvas, { onStateChange = () => {}, onFrame = () => {}, onPresent = () => {} } = {}) {
+  constructor(canvas, { onStateChange = () => {}, onBeforeFrame = () => {}, onFrame = () => {}, onPresent = () => {} } = {}) {
     this.canvas = canvas;
     this.gl = canvas.getContext("webgl2", { antialias: true, preserveDrawingBuffer: true });
     if (!this.gl) throw new Error("WebGL2 is not supported by this browser.");
     this.onStateChange = onStateChange;
+    this.onBeforeFrame = onBeforeFrame;
     this.onFrame = onFrame;
     this.onPresent = onPresent;
     this.state = structuredClone(DEFAULT_STATE);
@@ -432,10 +422,11 @@ export class Renderer {
   render = now => {
     if (!this.running) return;
     this.resizeCanvas();
-    const sourceUpdated = this.syncSourceTexture();
-
     const dt = Math.min((now - this.previousTime) / 1000, 0.1);
     this.previousTime = now;
+    if (this.state.playing) this.state.currentTime += dt;
+    this.onBeforeFrame(this.getState());
+    const sourceUpdated = this.syncSourceTexture();
     if (this.liveInteractionDirty) {
       this.drawStep(this.state.currentTime);
       this.present();
@@ -444,7 +435,6 @@ export class Renderer {
     } else if (this.sceneDirty) {
       this.rebuild();
     } else if (this.state.playing) {
-      this.state.currentTime += dt;
       this.drawStep(this.state.currentTime);
       this.present();
       this.onFrame(this.getState());

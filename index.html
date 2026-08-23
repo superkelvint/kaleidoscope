@@ -10,6 +10,10 @@
   <main>
     <section class="stage">
       <canvas id="gl"></canvas>
+      <div id="referenceOverlay" hidden aria-hidden="true">
+        <img id="referenceImage" alt="Drawing reference" draggable="false" />
+        <div id="referenceResizeHandle" aria-label="Resize reference image" title="Drag to resize"></div>
+      </div>
       <canvas id="wedgeGuides" aria-hidden="true"></canvas>
       <canvas id="drawingGuides" aria-hidden="true"></canvas>
       <div id="dropHint">Drop an image here</div>
@@ -34,8 +38,61 @@
           <label for="drawingBackgroundColor">Canvas background</label>
           <input id="drawingBackgroundColor" type="color" value="#000000" />
         </div>
+        <details class="controlSection">
+          <summary>Reference image</summary>
+          <label class="file">
+            <span>Choose reference image</span>
+            <input id="referenceFile" type="file" accept="image/*" />
+          </label>
+          <label class="check">
+            <input id="referenceVisible" type="checkbox" checked />
+            Show reference image
+          </label>
+          <div class="row">
+            <div class="rowLabel"><label for="referenceOpacity">Reference opacity</label><output id="referenceOpacityOut">50%</output></div>
+            <input id="referenceOpacity" type="range" min="0" max="1" step="0.01" value="0.5" />
+          </div>
+          <label class="check">
+            <input id="referenceEditing" type="checkbox" />
+            Edit placement
+          </label>
+          <p class="drawingHint">When editing, drag the image to move it or its lower-right corner to resize it.</p>
+          <button id="resetReference" type="button">Reset reference placement</button>
+        </details>
+        <details id="generatorSection" class="controlSection">
+          <summary>Generator</summary>
+          <div class="row">
+            <label for="drawingGenerator">Generator</label>
+            <select id="drawingGenerator" class="select">
+              <option value="none" selected>None</option>
+              <option value="spirograph">Spirograph</option>
+            </select>
+          </div>
+          <button id="editLatestGenerator" type="button" hidden>Edit latest Spirograph</button>
+          <div id="spirographControls" hidden>
+            <p id="spirographEditorStatus" class="drawingHint"></p>
+            <div class="row"><div class="rowLabel"><label for="spirographLobes">Lobes</label><output id="spirographLobesOut">5</output></div><input id="spirographLobes" type="range" min="3" max="12" step="1" value="5" /></div>
+            <div class="row"><div class="rowLabel"><label for="spirographPenOffset">Inner loop</label><output id="spirographPenOffsetOut">1.20</output></div><input id="spirographPenOffset" type="range" min="0" max="2" step="0.01" value="1.2" /></div>
+            <div class="row"><div class="rowLabel"><label for="spirographReach">Reach</label><output id="spirographReachOut">0.10</output></div><input id="spirographReach" type="range" min="0.05" max="0.48" step="0.01" value="0.1" /></div>
+            <div class="row"><div class="rowLabel"><label for="spirographRotation">Rotation</label><output id="spirographRotationOut">0°</output></div><input id="spirographRotation" type="range" min="0" max="360" step="1" value="0" /></div>
+            <div class="row"><div class="rowLabel"><label for="spirographArms">Arms</label><output id="spirographArmsOut">1</output></div><input id="spirographArms" type="range" min="1" max="8" step="1" value="1" /></div>
+            <div class="subhead">Motion</div>
+            <div class="row"><div class="rowLabel"><label for="spirographMotion">Motion</label><output id="spirographMotionOut">0.50</output></div><input id="spirographMotion" type="range" min="0" max="1" step="0.01" value="0.5" /></div>
+            <div class="row"><div class="rowLabel"><label for="spirographSpeed">Speed</label><output id="spirographSpeedOut">0.15 Hz</output></div><input id="spirographSpeed" type="range" min="0" max="2" step="0.01" value="0.15" /></div>
+            <div class="sourceButtons"><button id="commitGenerator" type="button">Commit</button><button id="resetGenerator" type="button">Reset</button></div>
+          </div>
+        </details>
         <details id="drawingBrushSection" class="controlSection" open>
           <summary>Brush</summary>
+        <div class="row">
+          <label for="drawingTool">Tool</label>
+          <select id="drawingTool" class="select">
+            <option value="freehand" selected>Freehand</option>
+            <option value="smart">Smart</option>
+            <option value="arc">Arc</option>
+            <option value="bezier">Bézier</option>
+          </select>
+        </div>
         <div class="row">
           <label for="drawingBrush">Brush</label>
           <select id="drawingBrush" class="select">
@@ -44,8 +101,6 @@
             <option value="calligraphy">Calligraphy</option>
             <option value="spray">Spray</option>
             <option value="texture">Texture</option>
-            <option value="arc">Arc</option>
-            <option value="bezier">Bézier</option>
           </select>
         </div>
         <div id="drawingColorModeControl" class="row">

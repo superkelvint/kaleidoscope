@@ -13,6 +13,10 @@ and task-specific plans elsewhere.
 | Bitmap loading/persistence            | `bitmap-source.js`                             |
 | Basic drawing source                  | `drawing-source.js`, then `app.js`             |
 | Canvas2D brush rendering              | `brushes.js`                                   |
+| Local motif symmetry mapping          | `local-motif.js`                               |
+| Drawing pointer mapping               | `drawing-mapping.js`                           |
+| Drawing interaction/tools             | `drawing-controller.js`                        |
+| Procedural drawable geometry          | `drawable-path.js`, then `generators.js`       |
 | Global wallpaper symmetry             | `global-wallpaper.js`                          |
 | New source type                       | source contract below, then `bitmap-source.js` |
 | Canvas gestures                       | `app.js`; transforms stay in `Renderer`        |
@@ -44,13 +48,27 @@ source-image migration. It must remain WebGL-free.
 
 ### `drawing-source.js` — drawing source
 
-Exports `DrawingSource`; owns its offscreen Canvas2D surface, brush settings,
-stroke interpolation, and frame revision. It remains WebGL-free and maps each
-pointer-space stroke sample to one source coordinate using the effective mapping
-state supplied by `Renderer`. Global wallpaper pointer mapping is not supported
-until it can match `global-wallpaper.js` exactly; `app.js` temporarily switches
-to `single` while Draw mode is active and restores the prior bitmap grid mode
-when returning to Image mode.
+Exports `DrawingSource`; owns its offscreen Canvas2D surface, preview
+rasterization, drawable replay, linear history, and frame revision. It remains
+WebGL-free and has no pointer, renderer mapping, tool, or UI state.
+
+### Drawing mapping and controller
+
+`local-motif.js` owns the CPU local motif transform and its GLSL counterpart.
+`drawing-mapping.js` owns frozen screen-to-source mapping, including wallpaper,
+motif, transforms, aspect correction, and Canvas Y inversion.
+`drawing-controller.js` owns pointer lifecycle, tools, constraints, previews,
+and immutable drawable styles; it commits `pathStroke` drawables to
+`DrawingSource`.
+
+### Procedural drawables
+
+`generators.js` contains pure, normalized mathematical recipes and no Canvas,
+DOM, renderer, or persistence concerns. `drawable-path.js` turns durable
+drawables into transient contour paths; it is the only layer that knows how a
+`generatedStroke` executes. `DrawingSource` supplies project time to this
+generic path derivation and rerasterizes only when committed or preview content
+depends on time. Brushes remain contour/path replay only.
 
 ### `brushes.js` — brush rendering
 

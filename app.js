@@ -1,17 +1,21 @@
 import { Renderer } from "./render.js";
 import { BitmapSource } from "./bitmap-source.js";
 import { DrawingSource } from "./drawing-source.js";
+import { DRAWING_BRUSHES, DrawingController } from "./drawing-controller.js";
 import { BRUSH_TEXTURES, DEFAULT_BRUSH_TEXTURE_ID, brushTextureCatalog } from "./brush-textures.js";
 import { GLOBAL_WALLPAPER_MODES } from "./global-wallpaper.js";
+import { GENERATORS } from "./generators.js";
 
 const $ = id => document.getElementById(id);
 const canvas = $("gl");
 const wedgeGuides = $("wedgeGuides");
 const drawingGuides = $("drawingGuides");
+const referenceOverlay = $("referenceOverlay");
+const referenceImage = $("referenceImage");
 const bitmapSource = new BitmapSource();
 let activeSource = bitmapSource;
 let sourceMode = "bitmap";
-const WORKSPACE_STORAGE_KEY = "kaleidoscope.workspace.v10";
+const WORKSPACE_STORAGE_KEY = "kaleidoscope.workspace.v11";
 const PLANAR_SYMMETRY_MODES = new Set(["tile", "p2", "p4", "pg", "hexagonal", "wallpaper"]);
 const TIMELINE_HALF_WINDOW = 30;
 let persistenceTimer = null;
@@ -24,6 +28,11 @@ let recordedChunks = [];
 let recordingTrack = null;
 let recordingFrameInterval = 0;
 let lastRecordedFrameTime = -Infinity;
+let referenceObjectUrl = null;
+const referenceState = { visible: true, opacity: .5, editing: false, x: 0, y: 0, width: 0, height: 0 };
+let referencePointer = null;
+let generatorDraft = null;
+let generatorEditorIndex = null;
 
 function requestRecordingFrame() {
   if (!recordingTrack?.requestFrame || mediaRecorder?.state !== "recording") return;
@@ -35,12 +44,14 @@ function requestRecordingFrame() {
 
 const renderer = new Renderer(canvas, {
   onStateChange: syncRendererState,
+  onBeforeFrame: state => drawingSource.setTime(state.currentTime),
   onFrame: syncFrame,
   // Canvas capture receives the fully composited frame, including bloom,
   // regardless of whether that frame came from a bitmap or DrawingSource.
   onPresent: requestRecordingFrame
 });
-const drawingSource = new DrawingSource({ getRendererState: () => renderer.getCurrentMappingState() });
+const drawingSource = new DrawingSource();
+const drawingController = new DrawingController({ source: drawingSource, getRendererState: () => renderer.getCurrentMappingState() });
 
 function setPersistenceStatus(message) { $("persistenceStatus").textContent = message; }
 
@@ -48,12 +59,13 @@ function setSourceMode(mode) {
   if (mode !== "bitmap" && mode !== "drawing") {
     throw new Error(`Unsupported source mode: ${mode}`);
   }
-  if (mode !== sourceMode) drawingSource.cancelConstruction();
+  if (mode !== sourceMode) drawingController.cancel();
   sourceMode = mode;
   activeSource = mode === "drawing" ? drawingSource : bitmapSource;
   renderer.setSource(activeSource);
   $("bitmapControls").hidden = mode !== "bitmap";
   $("drawingControls").hidden = mode !== "drawing";
+  updateReferenceOverlay();
   refreshDrawingHistoryControls();
   $("sourceImage").classList.toggle("active", mode === "bitmap");
   $("sourceImage").setAttribute("aria-pressed", String(mode === "bitmap"));
@@ -62,12 +74,54 @@ function setSourceMode(mode) {
   $("dropHint").style.display = mode === "bitmap" && !bitmapSource.getFrame() ? "grid" : "none";
 }
 
+function updateReferenceOverlay() {
+  const hasImage = Boolean(referenceImage.getAttribute("src"));
+  referenceOverlay.hidden = sourceMode !== "drawing" || !hasImage || !referenceState.visible;
+  referenceOverlay.classList.toggle("editing", !referenceOverlay.hidden && referenceState.editing);
+  referenceOverlay.style.opacity = String(referenceState.opacity);
+  referenceOverlay.style.left = `${referenceState.x}px`;
+  referenceOverlay.style.top = `${referenceState.y}px`;
+  referenceOverlay.style.width = `${referenceState.width}px`;
+  referenceOverlay.style.height = `${referenceState.height}px`;
+}
+
+function syncReferenceControls() {
+  $("referenceVisible").checked = referenceState.visible;
+  $("referenceOpacity").value = String(referenceState.opacity);
+  $("referenceOpacityOut").value = `${Math.round(referenceState.opacity * 100)}%`;
+  $("referenceEditing").checked = referenceState.editing;
+  updateReferenceOverlay();
+}
+
+function resetReferencePlacement() {
+  if (!referenceImage.naturalWidth || !referenceImage.naturalHeight) return;
+  const rect = canvas.getBoundingClientRect();
+  const scale = Math.min(rect.width * .7 / referenceImage.naturalWidth, rect.height * .7 / referenceImage.naturalHeight, 1);
+  referenceState.width = Math.max(1, referenceImage.naturalWidth * scale);
+  referenceState.height = Math.max(1, referenceImage.naturalHeight * scale);
+  referenceState.x = (rect.width - referenceState.width) / 2;
+  referenceState.y = (rect.height - referenceState.height) / 2;
+  updateReferenceOverlay();
+}
+
+function loadReferenceImage(file) {
+  if (!file?.type.startsWith("image/")) return;
+  if (referenceObjectUrl) URL.revokeObjectURL(referenceObjectUrl);
+  referenceObjectUrl = URL.createObjectURL(file);
+  referenceImage.onload = () => {
+    resetReferencePlacement();
+    scheduleWorkspaceSave();
+  };
+  referenceImage.src = referenceObjectUrl;
+}
+
 function workspaceSnapshot() {
   return {
     state: renderer.getState(),
-    drawing: drawingSource.getState(),
+    drawing: { version: 11, settings: drawingController.getState(), content: drawingSource.getContentState() },
     sourceMode,
     showMirrorGuides,
+    reference: { visible: referenceState.visible, opacity: referenceState.opacity },
     recordFps: Number($("recordFps").value) || 60
   };
 }
@@ -89,8 +143,13 @@ function restoreWorkspaceSettings() {
     const saved = JSON.parse(localStorage.getItem(WORKSPACE_STORAGE_KEY) || "null");
     if (!saved?.state) return false;
     showMirrorGuides = Boolean(saved.showMirrorGuides);
+    if (saved.reference) {
+      referenceState.visible = saved.reference.visible !== false;
+      const opacity = Number(saved.reference.opacity);
+      if (Number.isFinite(opacity)) referenceState.opacity = Math.min(1, Math.max(0, opacity));
+    }
     renderer.restoreState(saved.state);
-    if (saved.drawing) drawingSource.restoreState(saved.drawing);
+    if (saved.drawing?.version === 11) { drawingController.restoreState(saved.drawing.settings); drawingSource.restoreContentState(saved.drawing.content); }
     if (saved.recordFps === 30 || saved.recordFps === 60) $("recordFps").value = String(saved.recordFps);
     if (saved.sourceMode === "drawing") {
       setSourceMode("drawing");
@@ -110,12 +169,14 @@ function populateWallpaperModes() {
 }
 
 function syncRendererState(state) {
+  drawingSource.setTime(state.currentTime);
   syncAllControls(state);
   syncTimelineControls(state);
   scheduleWorkspaceSave();
 }
 
 function syncFrame(state) {
+  drawingSource.setTime(state.currentTime);
   syncTimelineControls(state);
   drawMirrorWedgeGuides({ ...state, segments: renderer.getCurrentMappingState().segments });
   drawDrawingGuides();
@@ -132,7 +193,7 @@ function drawDrawingGuides() {
   }
   const context = drawingGuides.getContext("2d");
   context.clearRect(0, 0, width, height);
-  const guide = sourceMode === "drawing" ? drawingSource.getInteractionGuide() : null;
+  const guide = sourceMode === "drawing" ? drawingController.getInteractionGuide() : null;
   if (!guide) return;
   const map = point => ({ x: (point.x - rect.left) * dpr, y: (point.y - rect.top) * dpr });
   context.save();
@@ -293,7 +354,7 @@ for(const eventName of ["pointerup","pointercancel"]) $("timeline").addEventList
 $("playPause").addEventListener("click",()=>renderer.updateState({playing:!renderer.getState().playing},{preview:false}));
 $("stepBack").addEventListener("click",()=>seek(renderer.getState().currentTime-1,{pause:true})); $("stepForward").addEventListener("click",()=>seek(renderer.getState().currentTime+1,{pause:true}));
 document.addEventListener("keydown", event => {
-  if (event.key === "Escape" && sourceMode === "drawing" && drawingSource.cancelConstruction()) {
+  if (event.key === "Escape" && sourceMode === "drawing" && drawingController.cancel()) {
     event.preventDefault();
     drawDrawingGuides();
     return;
@@ -324,7 +385,7 @@ canvas.addEventListener("drop",event=>{event.preventDefault();const file=event.d
 let dragging=false,lastX=0,lastY=0,secondaryCanvasGesture=null;
 canvas.addEventListener("pointerdown",event=>{
   if (event.button === 2) {
-    if (sourceMode === "drawing" && drawingSource.cancelConstruction()) {
+    if (sourceMode === "drawing" && drawingController.cancel()) {
       event.preventDefault();
       drawDrawingGuides();
       return;
@@ -342,8 +403,9 @@ canvas.addEventListener("pointerdown",event=>{
   }
   if (sourceMode === "drawing") {
     if (event.button !== 0) return;
+    if (generatorDraft) return;
     canvas.setPointerCapture(event.pointerId);
-    activeSource.pointerDown?.(event, canvas);
+    drawingController.begin(event, canvas);
     drawDrawingGuides();
     return;
   }
@@ -371,7 +433,8 @@ canvas.addEventListener("pointermove",event=>{
     return;
   }
   if (sourceMode === "drawing") {
-    activeSource.pointerMove?.(event, canvas);
+    if (generatorDraft) return;
+    drawingController.move(event);
     drawDrawingGuides();
     return;
   }
@@ -386,8 +449,9 @@ for(const name of ["pointerup","pointercancel"])canvas.addEventListener(name,eve
     return;
   }
   if (sourceMode === "drawing") {
-    if (name === "pointercancel") activeSource.pointerCancel?.(event);
-    else activeSource.pointerUp?.(event);
+    if (generatorDraft) return;
+    if (name === "pointercancel") drawingController.cancel(event);
+    else drawingController.end(event);
     drawDrawingGuides();
     refreshDrawingHistoryControls();
     if (name !== "pointercancel") scheduleWorkspaceSave();
@@ -398,41 +462,219 @@ for(const name of ["pointerup","pointercancel"])canvas.addEventListener(name,eve
 canvas.addEventListener("contextmenu", event => event.preventDefault());
 canvas.addEventListener("wheel",event=>{event.preventDefault();renderer.zoomBy(Math.exp(-event.deltaY*.001));},{passive:false});
 
+$("referenceFile").addEventListener("change", event => {
+  const file = event.target.files?.[0];
+  if (file) loadReferenceImage(file);
+  event.target.value = "";
+});
+$("referenceVisible").addEventListener("change", event => {
+  referenceState.visible = event.target.checked;
+  updateReferenceOverlay();
+});
+$("referenceOpacity").addEventListener("input", event => {
+  referenceState.opacity = Number(event.target.value);
+  $("referenceOpacityOut").value = `${Math.round(referenceState.opacity * 100)}%`;
+  updateReferenceOverlay();
+});
+$("referenceEditing").addEventListener("change", event => {
+  referenceState.editing = event.target.checked;
+  updateReferenceOverlay();
+});
+$("resetReference").addEventListener("click", resetReferencePlacement);
+referenceOverlay.addEventListener("pointerdown", event => {
+  if (!referenceState.editing || event.button !== 0) return;
+  const resizing = event.target === $("referenceResizeHandle");
+  referencePointer = {
+    id: event.pointerId,
+    resizing,
+    startX: event.clientX,
+    startY: event.clientY,
+    x: referenceState.x,
+    y: referenceState.y,
+    width: referenceState.width,
+    height: referenceState.height
+  };
+  referenceOverlay.setPointerCapture(event.pointerId);
+  event.preventDefault();
+});
+referenceOverlay.addEventListener("pointermove", event => {
+  if (!referencePointer || referencePointer.id !== event.pointerId) return;
+  const gesture = referencePointer;
+  const deltaX = event.clientX - gesture.startX;
+  const deltaY = event.clientY - gesture.startY;
+  if (gesture.resizing) {
+    const aspect = gesture.width / Math.max(gesture.height, 1);
+    const width = Math.max(24, gesture.width + deltaX);
+    referenceState.width = width;
+    referenceState.height = width / aspect;
+  } else {
+    referenceState.x = gesture.x + deltaX;
+    referenceState.y = gesture.y + deltaY;
+  }
+  updateReferenceOverlay();
+  event.preventDefault();
+});
+for (const eventName of ["pointerup", "pointercancel"]) referenceOverlay.addEventListener(eventName, event => {
+  if (!referencePointer || referencePointer.id !== event.pointerId) return;
+  referencePointer = null;
+  if (eventName === "pointerup") scheduleWorkspaceSave();
+});
+
 $("sourceImage").addEventListener("click", () => setSourceMode("bitmap"));
 $("sourceDrawing").addEventListener("click", () => setSourceMode("drawing"));
-function syncDrawingBrushControls(name = drawingSource.brushName) {
+function makeSpirographDraft() {
+  const generator = GENERATORS.spirograph;
+  if (!DRAWING_BRUSHES.includes(drawingController.settings.brush)) drawingController.setBrush("pen");
+  return {
+    kind: "generatedStroke",
+    generator: generator.id,
+    generatorVersion: generator.version,
+    config: structuredClone(generator.defaults),
+    animation: { amount: .5, speed: .15, phase: 0 },
+    domain: { start: 0, end: generator.period() },
+    sampling: { mode: "parameter", step: .01 },
+    style: drawingController.styleSnapshot()
+  };
+}
+function editedGenerator() {
+  if (!Number.isInteger(generatorEditorIndex) || generatorEditorIndex < 0 || generatorEditorIndex >= drawingSource.historyIndex) return null;
+  const operation = drawingSource.history[generatorEditorIndex];
+  return operation?.type === "drawable" && operation.drawable?.kind === "generatedStroke" ? operation.drawable : null;
+}
+function latestGeneratedIndex() {
+  for (let index = drawingSource.historyIndex - 1; index >= 0; index -= 1) {
+    if (drawingSource.history[index]?.drawable?.kind === "generatedStroke") return index;
+  }
+  return null;
+}
+function activeGenerator() { return generatorDraft || editedGenerator(); }
+function syncGeneratorControls() {
+  const drawable = activeGenerator();
+  const editing = Boolean(!generatorDraft && drawable);
+  if (!drawable) generatorEditorIndex = null;
+  $("drawingGenerator").value = drawable ? "spirograph" : "none";
+  $("spirographControls").hidden = !drawable;
+  const latestIndex = latestGeneratedIndex();
+  $("editLatestGenerator").hidden = Boolean(drawable) || latestIndex === null;
+  $("spirographEditorStatus").textContent = generatorDraft ? "Draft preview — Commit to add it to the drawing." : editing ? "Editing committed Spirograph — changes are saved immediately." : "";
+  $("commitGenerator").textContent = editing ? "Done" : "Commit";
+  $("resetGenerator").textContent = editing ? "Stop Editing" : "Reset";
+  if (!drawable) return;
+  const values = {
+    Lobes: [drawable.config.lobes, value => String(Math.round(value))],
+    PenOffset: [drawable.config.penOffset, value => Number(value).toFixed(2)],
+    Reach: [drawable.config.reach, value => Number(value).toFixed(2)],
+    Rotation: [drawable.config.rotation * 180 / Math.PI, value => `${Math.round(value)}°`],
+    Arms: [drawable.config.arms, value => String(Math.round(value))],
+    Motion: [drawable.animation.amount, value => Number(value).toFixed(2)],
+    Speed: [drawable.animation.speed, value => `${Number(value).toFixed(2)} Hz`]
+  };
+  for (const [name, [value, format]] of Object.entries(values)) {
+    $("spirograph" + name).value = String(value);
+    $("spirograph" + name + "Out").value = format(value);
+  }
+}
+function previewGeneratorDraft() {
+  drawingSource.setTime(renderer.getState().currentTime);
+  drawingSource.previewDrawable(generatorDraft);
+  syncGeneratorControls();
+  // A draft is a source-pixel change, not renderer state. Request one normal
+  // presentation pass so a paused timeline shows it immediately.
+  renderer.updateState({}, { preview: true });
+}
+function refreshGeneratorDraftStyle() {
+  if (!generatorDraft) return;
+  generatorDraft.style = { ...drawingController.styleSnapshot(), seed: generatorDraft.style.seed };
+  previewGeneratorDraft();
+}
+function resetGeneratorDraft() {
+  generatorDraft = null;
+  generatorEditorIndex = null;
+  drawingSource.previewDrawable(null);
+  syncGeneratorControls();
+  renderer.updateState({}, { preview: true });
+}
+$("drawingGenerator").addEventListener("change", event => {
+  drawingController.cancel();
+  if (event.target.value === "spirograph") {
+    generatorEditorIndex = null;
+    generatorDraft = makeSpirographDraft();
+    previewGeneratorDraft();
+  } else resetGeneratorDraft();
+  drawDrawingGuides();
+});
+$("editLatestGenerator").addEventListener("click", () => {
+  const index = latestGeneratedIndex();
+  if (index === null) return;
+  drawingController.cancel();
+  generatorDraft = null;
+  generatorEditorIndex = index;
+  drawingSource.previewDrawable(null);
+  syncGeneratorControls();
+});
+const generatorInputFields = {
+  spirographLobes: ["config", "lobes"], spirographPenOffset: ["config", "penOffset"], spirographReach: ["config", "reach"],
+  spirographArms: ["config", "arms"], spirographMotion: ["animation", "amount"], spirographSpeed: ["animation", "speed"]
+};
+for (const [id, [group, key]] of Object.entries(generatorInputFields)) $(id).addEventListener("input", event => {
+  const drawable = structuredClone(activeGenerator());
+  if (!drawable) return;
+  drawable[group][key] = Number(event.target.value);
+  if (generatorDraft) { generatorDraft = drawable; previewGeneratorDraft(); }
+  else if (drawingSource.replaceDrawable(generatorEditorIndex, drawable)) { syncGeneratorControls(); scheduleWorkspaceSave(); }
+});
+$("spirographRotation").addEventListener("input", event => {
+  const drawable = structuredClone(activeGenerator());
+  if (!drawable) return;
+  drawable.config.rotation = Number(event.target.value) * Math.PI / 180;
+  if (generatorDraft) { generatorDraft = drawable; previewGeneratorDraft(); }
+  else if (drawingSource.replaceDrawable(generatorEditorIndex, drawable)) { syncGeneratorControls(); scheduleWorkspaceSave(); }
+});
+$("commitGenerator").addEventListener("click", () => {
+  if (!generatorDraft) { resetGeneratorDraft(); return; }
+  if (drawingSource.commitDrawable(generatorDraft)) {
+    generatorDraft = null;
+    generatorEditorIndex = drawingSource.historyIndex - 1;
+    syncGeneratorControls();
+    refreshDrawingHistoryControls();
+    scheduleWorkspaceSave();
+  }
+});
+$("resetGenerator").addEventListener("click", resetGeneratorDraft);
+function syncDrawingBrushControls(name = drawingController.settings.brush) {
   $("drawingRibbonControls").hidden = name !== "ribbon";
   $("drawingCalligraphyControls").hidden = name !== "calligraphy";
   $("drawingSprayControls").hidden = name !== "spray";
   $("drawingTextureControls").hidden = name !== "texture";
-  syncDrawingColorControls(drawingSource.colorMode);
+  syncDrawingColorControls(drawingController.settings.colorMode);
   if (name === "texture") {
     loadCurrentTexture();
   }
 }
-function syncDrawingColorControls(mode = drawingSource.colorMode) {
+function syncDrawingColorControls(mode = drawingController.settings.colorMode) {
   $("drawingSolidColorControl").hidden = mode !== "solid";
   $("drawingGradientColorControls").hidden = mode !== "gradient";
 }
 function syncDrawingControls() {
-  $("drawingBrush").value = drawingSource.brushName;
+  $("drawingTool").value = drawingController.settings.tool;
+  $("drawingBrush").value = drawingController.settings.brush;
   $("drawingBackgroundColor").value = drawingSource.backgroundColor;
-  $("drawingColorMode").value = drawingSource.colorMode;
-  $("drawingColor").value = drawingSource.color;
-  $("drawingGradientStartColor").value = drawingSource.gradientStartColor;
-  $("drawingGradientEndColor").value = drawingSource.gradientEndColor;
-  $("drawingSize").value = String(drawingSource.size);
-  $("drawingOpacity").value = String(drawingSource.opacity);
-  $("drawingSmoothing").value = String(Math.round(drawingSource.smoothing * 100));
-  $("drawingSmoothingOut").value = `${Math.round(drawingSource.smoothing * 100)}%`;
-  $("drawingLines").value = String(drawingSource.lines);
-  $("drawingSpan").value = String(drawingSource.span);
-  $("drawingNibRatio").value = String(drawingSource.nibRatio);
-  $("drawingDensity").value = String(drawingSource.density);
-  $("drawingParticleSize").value = String(drawingSource.particleSize);
-  $("drawingTextureSpacing").value = String(drawingSource.textureSpacing);
-  $("drawingTextureSpacingOut").value = `${drawingSource.textureSpacing.toFixed(2)}×`;
-  const rotation = document.querySelector(`input[name="drawingTextureRotation"][value="${drawingSource.textureRotationMode}"]`);
+  $("drawingColorMode").value = drawingController.settings.colorMode;
+  $("drawingColor").value = drawingController.settings.color;
+  $("drawingGradientStartColor").value = drawingController.settings.gradientStartColor;
+  $("drawingGradientEndColor").value = drawingController.settings.gradientEndColor;
+  $("drawingSize").value = String(drawingController.settings.size);
+  $("drawingOpacity").value = String(drawingController.settings.opacity);
+  $("drawingSmoothing").value = String(Math.round(drawingController.settings.smoothing * 100));
+  $("drawingSmoothingOut").value = `${Math.round(drawingController.settings.smoothing * 100)}%`;
+  $("drawingLines").value = String(drawingController.settings.lines);
+  $("drawingSpan").value = String(drawingController.settings.span);
+  $("drawingNibRatio").value = String(drawingController.settings.nibRatio);
+  $("drawingDensity").value = String(drawingController.settings.density);
+  $("drawingParticleSize").value = String(drawingController.settings.particleSize);
+  $("drawingTextureSpacing").value = String(drawingController.settings.textureSpacing);
+  $("drawingTextureSpacingOut").value = `${Number(drawingController.settings.textureSpacing).toFixed(2)}×`;
+  const rotation = document.querySelector(`input[name="drawingTextureRotation"][value="${drawingController.settings.textureRotationMode}"]`);
   if (rotation) rotation.checked = true;
   syncDrawingBrushControls();
   syncDrawingColorControls();
@@ -443,50 +685,59 @@ function refreshDrawingHistoryControls() {
   $("redoDrawing").disabled = !drawingSource.canRedo();
 }
 $("drawingBrush").addEventListener("change", event => {
-  drawingSource.setBrush(event.target.value);
+  drawingController.setBrush(event.target.value);
   // Pen begins at 8px, which reduces even a detailed PNG tip to a line. Give
   // Texture a useful first-use size without overriding an intentional size.
-  if (event.target.value === "texture" && drawingSource.size === 8) {
-    drawingSource.setSize(64);
+  if (event.target.value === "texture" && drawingController.settings.size === 8) {
+    drawingController.set("size", 64);
     $("drawingSize").value = "64";
   }
   syncDrawingBrushControls();
+  refreshGeneratorDraftStyle();
   drawDrawingGuides();
 });
+$("drawingTool").addEventListener("change", event => { drawingController.setTool(event.target.value); drawDrawingGuides(); });
 $("drawingSmoothing").addEventListener("input", event => {
   const percent = Number(event.target.value);
-  drawingSource.setSmoothing(percent / 100);
+  drawingController.set("smoothing", percent / 100);
   $("drawingSmoothingOut").value = `${Math.round(percent)}%`;
 });
-$("drawingColor").addEventListener("input", event => drawingSource.setColor(event.target.value));
+$("drawingColor").addEventListener("input", event => { drawingController.set("color", event.target.value); refreshGeneratorDraftStyle(); });
 function applyDrawingBackgroundColor(value) {
   drawingSource.setBackgroundColor(value);
 }
 $("drawingBackgroundColor").addEventListener("input", event => applyDrawingBackgroundColor(event.target.value));
 $("drawingBackgroundColor").addEventListener("change", event => applyDrawingBackgroundColor(event.target.value));
 $("drawingColorMode").addEventListener("change", event => {
-  drawingSource.setColorMode(event.target.value);
+  drawingController.set("colorMode", event.target.value);
   syncDrawingColorControls();
+  refreshGeneratorDraftStyle();
 });
-$("drawingGradientStartColor").addEventListener("input", event => drawingSource.setGradientStartColor(event.target.value));
-$("drawingGradientEndColor").addEventListener("input", event => drawingSource.setGradientEndColor(event.target.value));
-$("drawingSize").addEventListener("input", event => drawingSource.setSize(event.target.value));
-$("drawingOpacity").addEventListener("input", event => drawingSource.setOpacity(event.target.value));
-$("drawingLines").addEventListener("input", event => drawingSource.setLines(event.target.value));
-$("drawingSpan").addEventListener("input", event => drawingSource.setSpan(event.target.value));
-$("drawingNibRatio").addEventListener("input", event => drawingSource.setNibRatio(event.target.value));
-$("drawingDensity").addEventListener("input", event => drawingSource.setDensity(event.target.value));
-$("drawingParticleSize").addEventListener("input", event => drawingSource.setParticleSize(event.target.value));
+$("drawingGradientStartColor").addEventListener("input", event => { drawingController.set("gradientStartColor", event.target.value); refreshGeneratorDraftStyle(); });
+$("drawingGradientEndColor").addEventListener("input", event => { drawingController.set("gradientEndColor", event.target.value); refreshGeneratorDraftStyle(); });
+$("drawingSize").addEventListener("input", event => { drawingController.set("size", event.target.value); refreshGeneratorDraftStyle(); });
+$("drawingOpacity").addEventListener("input", event => { drawingController.set("opacity", event.target.value); refreshGeneratorDraftStyle(); });
+$("drawingLines").addEventListener("input", event => { drawingController.set("lines", event.target.value); refreshGeneratorDraftStyle(); });
+$("drawingSpan").addEventListener("input", event => { drawingController.set("span", event.target.value); refreshGeneratorDraftStyle(); });
+$("drawingNibRatio").addEventListener("input", event => { drawingController.set("nibRatio", event.target.value); refreshGeneratorDraftStyle(); });
+$("drawingDensity").addEventListener("input", event => { drawingController.set("density", event.target.value); refreshGeneratorDraftStyle(); });
+$("drawingParticleSize").addEventListener("input", event => { drawingController.set("particleSize", event.target.value); refreshGeneratorDraftStyle(); });
 $("drawingTextureSpacing").addEventListener("input", event => {
-  drawingSource.setTextureSpacing(event.target.value);
+  drawingController.set("textureSpacing", event.target.value);
   $("drawingTextureSpacingOut").value = `${Number(event.target.value).toFixed(2)}×`;
+  refreshGeneratorDraftStyle();
 });
 document.querySelectorAll('input[name="drawingTextureRotation"]').forEach(input => input.addEventListener("change", event => {
-  if (event.target.checked) drawingSource.setTextureRotationMode(event.target.value);
+  if (event.target.checked) { drawingController.set("textureRotationMode", event.target.value); refreshGeneratorDraftStyle(); }
 }));
 $("undoDrawing").addEventListener("click", () => { drawingSource.undo(); refreshDrawingHistoryControls(); scheduleWorkspaceSave(); });
 $("redoDrawing").addEventListener("click", () => { drawingSource.redo(); refreshDrawingHistoryControls(); scheduleWorkspaceSave(); });
-$("clearDrawing").addEventListener("click", () => { drawingSource.clear(); refreshDrawingHistoryControls(); scheduleWorkspaceSave(); });
+$("clearDrawing").addEventListener("click", () => {
+  drawingSource.clear();
+  seek(0, { pause: true });
+  refreshDrawingHistoryControls();
+  scheduleWorkspaceSave();
+});
 
 const brushDialog = $("brushBrowser");
 function drawTexturePreview(canvas, texture) {
@@ -495,11 +746,11 @@ function drawTexturePreview(canvas, texture) {
   if (texture) context.drawImage(texture.thumbnailCanvas, 0, 0, canvas.width, canvas.height);
 }
 function syncCurrentTexture() {
-  const entry = brushTextureCatalog.getEntry(drawingSource.textureId) || brushTextureCatalog.getEntry(DEFAULT_BRUSH_TEXTURE_ID);
+  const entry = brushTextureCatalog.getEntry(drawingController.settings.textureId) || brushTextureCatalog.getEntry(DEFAULT_BRUSH_TEXTURE_ID);
   $("drawingCurrentTextureName").textContent = entry?.label || "No brush selected";
-  drawTexturePreview($("drawingCurrentTexturePreview"), brushTextureCatalog.get(drawingSource.textureId));
+  drawTexturePreview($("drawingCurrentTexturePreview"), brushTextureCatalog.get(drawingController.settings.textureId));
   document.querySelectorAll("[data-brush-texture-id]").forEach(tile => {
-    const selected = tile.dataset.brushTextureId === drawingSource.textureId;
+    const selected = tile.dataset.brushTextureId === drawingController.settings.textureId;
     tile.setAttribute("aria-pressed", String(selected));
     tile.classList.toggle("selected", selected);
   });
@@ -513,20 +764,26 @@ function updateTextureTile(id) {
   const preview = tile.querySelector("canvas");
   if (texture && preview) drawTexturePreview(preview, texture);
 }
-async function loadCurrentTexture(id = drawingSource.textureId) {
-  const pending = drawingSource.setTextureId(id);
+async function loadCurrentTexture(id = drawingController.settings.textureId) {
+  if (!brushTextureCatalog.getEntry(id)) return;
   $("drawingTextureStatus").textContent = "Loading brush tip…";
   syncCurrentTexture();
-  const texture = await pending;
-  const fellBack = drawingSource.textureId !== id && id === DEFAULT_BRUSH_TEXTURE_ID && texture;
-  if (drawingSource.textureId !== id && !fellBack) {
+  let selectedId = id;
+  let texture = await brushTextureCatalog.ensure(selectedId);
+  if (!texture && id === DEFAULT_BRUSH_TEXTURE_ID) {
+    const fallback = BRUSH_TEXTURES.find(entry => brushTextureCatalog.getEntry(entry.id));
+    if (fallback) { selectedId = fallback.id; texture = await brushTextureCatalog.ensure(selectedId); }
+  }
+  if (!texture) {
     updateTextureTile(id);
     return;
   }
+  drawingController.set("textureId", selectedId);
+  refreshGeneratorDraftStyle();
   $("drawingTextureStatus").textContent = texture ? "" : "Brush tip unavailable.";
   syncCurrentTexture();
   updateTextureTile(id);
-  if (drawingSource.textureId !== id) updateTextureTile(drawingSource.textureId);
+  if (selectedId !== id) updateTextureTile(selectedId);
 }
 function renderBrushBrowser() {
   const grid = $("brushBrowserGrid");
@@ -536,7 +793,7 @@ function renderBrushBrowser() {
     tile.type = "button";
     tile.className = "brushTile";
     tile.dataset.brushTextureId = entry.id;
-    tile.setAttribute("aria-pressed", String(entry.id === drawingSource.textureId));
+    tile.setAttribute("aria-pressed", String(entry.id === drawingController.settings.textureId));
     const preview = document.createElement("canvas");
     preview.width = 96; preview.height = 96;
     preview.setAttribute("aria-hidden", "true");
@@ -551,7 +808,7 @@ function renderBrushBrowser() {
   BRUSH_TEXTURES.forEach((entry, index) => setTimeout(async () => {
     await brushTextureCatalog.ensure(entry.id);
     updateTextureTile(entry.id);
-    if (entry.id === drawingSource.textureId) syncCurrentTexture();
+    if (entry.id === drawingController.settings.textureId) syncCurrentTexture();
   }, index * 20));
 }
 $("browseBrushes").addEventListener("click", () => {
@@ -581,7 +838,7 @@ $("save").addEventListener("click",()=>{const a=document.createElement("a");a.do
 
 document.addEventListener("input",scheduleWorkspaceSave,true); document.addEventListener("change",scheduleWorkspaceSave,true); window.addEventListener("pagehide",saveWorkspaceSettingsNow);
 window.addEventListener("resize", () => drawMirrorWedgeGuides());
-persistenceEnabled=false; const hadSavedSettings=restoreWorkspaceSettings(); populateWallpaperModes(); syncAllControls(); syncTimelineControls(); syncDrawingControls(); refreshDrawingHistoryControls(); persistenceEnabled=true;
+persistenceEnabled=false; const hadSavedSettings=restoreWorkspaceSettings(); populateWallpaperModes(); syncAllControls(); syncTimelineControls(); syncDrawingControls(); syncReferenceControls(); syncGeneratorControls(); refreshDrawingHistoryControls(); persistenceEnabled=true;
 setPersistenceStatus(hadSavedSettings?"Settings restored. Restoring source image...":"Local workspace save enabled."); renderer.start();
 setTimeout(async()=>{try{const result=await bitmapSource.restore();if(result.restored){if(sourceMode==="bitmap")setSourceMode("bitmap");$("dropHint").style.display="none";setPersistenceStatus(result.migrated?"Previous workspace restored and image migrated to IndexedDB.":"Previous workspace restored.");}}catch(error){console.warn("Unable to restore source image",error);setPersistenceStatus("Settings restored; saved source image could not be decoded.");}},0);
 saveWorkspaceSettingsNow();

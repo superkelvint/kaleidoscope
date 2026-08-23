@@ -1,0 +1,81 @@
+import { BRUSHES, canReplayBrushPath } from "./brushes.js";
+import { DEFAULT_BRUSH_TEXTURE_ID } from "./brush-textures.js";
+import { interpretGesture, preprocessGesture, sampleCanonicalGesture } from "./gesture-interpreter.js";
+import { sampleCircularArc, sampleCubicBezier } from "./constructed-strokes.js";
+import { displayGeometryContext, screenToSourcePoint } from "./drawing-mapping.js";
+
+const TAU = Math.PI * 2, CONTINUOUS = { spray: 30, texture: 12 };
+const TOOLS = new Set(["freehand", "smart", "arc", "bezier"]);
+export const DRAWING_BRUSHES = ["pen", "ribbon", "calligraphy", "spray", "texture"];
+const clone = value => structuredClone(value);
+
+export class DrawingController {
+  constructor({ source, getRendererState = () => ({}) }) {
+    this.source = source; this.getRendererState = getRendererState;
+    this.settings = { tool: "freehand", brush: "pen", color: "#ffffff", colorMode: "solid", gradientStartColor: "#ffffff", gradientEndColor: "#ff4da6", size: 8, opacity: .85, lines: 5, span: 24, nibRatio: .22, density: 24, particleSize: 1.5, textureId: DEFAULT_BRUSH_TEXTURE_ID, textureSpacing: .25, textureRotationMode: "followStroke", smoothing: .35 };
+    this.current = null; this.construction = null; this.timer = null;
+  }
+  getState() { return clone(this.settings); }
+  restoreState(settings) {
+    if (!settings || typeof settings !== "object") return false;
+    for (const [key, value] of Object.entries(settings)) {
+      if (!(key in this.settings)) continue;
+      if (key === "tool" && !TOOLS.has(value)) continue;
+      if (key === "brush" && !BRUSHES[value]) continue;
+      this.settings[key] = value;
+    }
+    return true;
+  }
+  setTool(tool) { if (TOOLS.has(tool)) { this.cancel(); this.settings.tool = tool; } }
+  setBrush(brush) { if (BRUSHES[brush]) this.settings.brush = brush; }
+  set(key, value) { if (key in this.settings) this.settings[key] = value; }
+  styleSnapshot() { const s = this.settings; return { brush: s.brush, color: s.color, colorMode: s.colorMode, startColor: s.gradientStartColor, endColor: s.gradientEndColor, size: Number(s.size), opacity: Number(s.opacity), lines: Number(s.lines), span: Number(s.span), nibRatio: Number(s.nibRatio), density: Number(s.density), particleSize: Number(s.particleSize), textureId: s.textureId, spacing: Number(s.textureSpacing), rotationMode: s.textureRotationMode, taper: "none", seed: Math.floor(Math.random() * 0x100000000) }; }
+  point(event) { return { x: event.clientX, y: event.clientY }; }
+  map(point, current) { return screenToSourcePoint(point, current.canvas, current.mapping, this.source.width, this.source.height); }
+  begin(event, canvas) {
+    if (this.settings.tool === "arc" || this.settings.tool === "bezier") return this.constructDown(event, canvas);
+    const mapping = { ...this.getRendererState() }, p = this.point(event);
+    const current = { pointerId: event.pointerId, canvas, mapping, context: displayGeometryContext(mapping, canvas), anchor: p, last: p, smooth: p, displayPoints: [p], points: [], style: this.styleSnapshot(), heldAt: performance.now(), remainder: 0, wedge: null };
+    const constrained = this.interactionPoint(event, current);
+    current.anchor = constrained; current.last = constrained; current.smooth = constrained; current.displayPoints = [constrained]; current.points = [this.map(constrained, current)];
+    this.current = current;
+    this.startContinuous();
+  }
+  move(event) {
+    if (this.construction) return this.constructMove(event);
+    const c = this.current; if (!c || c.pointerId !== event.pointerId) return;
+    const p = this.interactionPoint(event, c);
+    if (this.settings.tool === "smart") { c.displayPoints.push(p); if (c.displayPoints.length > 64) c.displayPoints = preprocessGesture(c.displayPoints, 64); this.previewSmart(c); c.last = p; return; }
+    if (event.shiftKey) { c.points = [this.map(c.anchor, c), this.map(p, c)]; c.last = p; this.preview(c); return; }
+    const alpha = 1 - Math.min(1, Math.max(0, Number(this.settings.smoothing) || 0)) * .88;
+    const q = c.wedge ? p : { x: c.smooth.x + (p.x - c.smooth.x) * alpha, y: c.smooth.y + (p.y - c.smooth.y) * alpha };
+    this.capture(c.last, q, c); c.last = q; c.smooth = q; this.preview(c);
+  }
+  end(event) {
+    if (this.construction) return this.constructUp(event);
+    const c = this.current; if (!c || c.pointerId !== event.pointerId) return;
+    this.deposit();
+    if (this.settings.tool === "smart") { const gesture = interpretGesture(c.displayPoints, c.context); if (gesture) c.points = sampleCanonicalGesture(gesture, this.count(gesture.points, c)).map(p => this.map(p, c)); }
+    else if (!event.shiftKey) this.capture(c.last, this.interactionPoint(event, c), c);
+    const drawable = { kind: "pathStroke", points: c.points.map(clone), style: clone(c.style) };
+    this.source.previewDrawable(null); if (canReplayBrushPath(drawable.points, drawable.style)) this.source.commitDrawable(drawable);
+    this.stopContinuous(); this.current = null;
+  }
+  cancel(event) { if (event && this.current?.pointerId !== event.pointerId && this.construction?.pointerId !== event.pointerId) return false; const hadInteraction = Boolean(this.current || this.construction); if (!hadInteraction) return false; this.current = null; this.construction = null; this.stopContinuous(); this.source.previewDrawable(null); return true; }
+  preview(c) { this.source.previewDrawable({ kind: "pathStroke", points: c.points.map(clone), style: c.style }); }
+  capture(a, b, c) { const rect = c.canvas.getBoundingClientRect(), spp = Math.max(this.source.width / Math.max(rect.width, 1), this.source.height / Math.max(rect.height, 1)), steps = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / Math.min(2, Math.max(.5, c.style.size * .2 / spp)))); for (let i = 1; i <= steps; i += 1) { const p = this.map({ x: a.x + (b.x - a.x) * i / steps, y: a.y + (b.y - a.y) * i / steps }, c); this.pushPoint(c.points, p); } }
+  pushPoint(points, point) { if (points.length && Math.hypot(point.x - points.at(-1).x, point.y - points.at(-1).y) < .25) return; points.push({ ...point }); if (points.length <= 512) return; const reduced = Array.from({ length: 512 }, (_, i) => { const source = points[Math.round(i * (points.length - 1) / 511)]; return { x: source.x, y: source.y }; }); for (let i = 0; i < points.length; i += 1) { const held = Number(points[i].holdCount) || 0; if (held) { const target = Math.round(i * 511 / (points.length - 1)); reduced[target].holdCount = (Number(reduced[target].holdCount) || 0) + held; } } points.splice(0, points.length, ...reduced); }
+  count(points, c) { const rect = c.canvas.getBoundingClientRect(), spp = Math.max(this.source.width / rect.width, this.source.height / rect.height); let length = 0; for (let i = 1; i < points.length; i += 1) length += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y); return Math.min(512, Math.max(points.length, Math.ceil(length / Math.min(2, Math.max(.5, c.style.size * .2 / spp))) + 1)); }
+  previewSmart(c) { const gesture = interpretGesture(c.displayPoints, c.context); if (!gesture) return this.source.previewDrawable(null); const points = sampleCanonicalGesture(gesture, this.count(gesture.points, c)).map(p => this.map(p, c)); this.source.previewDrawable({ kind: "pathStroke", points, style: c.style }); }
+  snapWedge(p, c) { const mode = c.context.symmetryMode; if (!["radial", "mirrorRadial", "spiral"].includes(mode)) return p; if (!c.wedge) { const step = TAU / Math.max(2, Number(c.context.segments) || 2) / ((mode !== "radial" || c.context.mirror) ? 2 : 1), a = Math.round(Math.atan2(p.y - c.context.center.y, p.x - c.context.center.x) / step) * step; c.wedge = { x: Math.cos(a), y: Math.sin(a) }; } const dx = p.x - c.context.center.x, dy = p.y - c.context.center.y, d = dx * c.wedge.x + dy * c.wedge.y; return { x: c.context.center.x + c.wedge.x * d, y: c.context.center.y + c.wedge.y * d }; }
+  interactionPoint(event, current) { const point = this.point(event); if (!event.ctrlKey) { current.wedge = null; return point; } return this.snapWedge(point, current); }
+  startContinuous() { const rate = CONTINUOUS[this.current?.style.brush]; if (!rate) return; this.timer = setInterval(() => this.deposit(), 1000 / 60); }
+  stopContinuous() { if (this.timer) clearInterval(this.timer); this.timer = null; }
+  deposit() { const c = this.current, rate = CONTINUOUS[c?.style.brush]; if (!rate || !c?.points.length) return; const t = performance.now(), available = c.remainder + (t - c.heldAt) * rate / 1000, n = Math.floor(available); c.heldAt = t; c.remainder = available - n; if (n) { const p = c.points.at(-1); p.holdCount = (p.holdCount || 0) + n; this.preview(c); } }
+  constructDown(event, canvas) { const p = this.point(event); if (!this.construction) { const mapping = { ...this.getRendererState() }; this.construction = { pointerId: event.pointerId, canvas, mapping, tool: this.settings.tool, anchors: { start: p }, handles: {}, stage: "end", style: this.styleSnapshot() }; return; } const c = this.construction; if (!c.anchors.end) { c.anchors.end = p; c.handles = c.tool === "arc" ? { bend: p } : { startHandle: { x: (c.anchors.start.x * 2 + p.x) / 3, y: (c.anchors.start.y * 2 + p.y) / 3 }, endHandle: { x: (c.anchors.start.x + p.x * 2) / 3, y: (c.anchors.start.y + p.y * 2) / 3 } }; c.active = Object.keys(c.handles)[0]; c.dragging = false; this.updateConstruction(c); return; } c.pointerId = event.pointerId; c.dragging = true; }
+  constructMove(event) { const c = this.construction; if (!c?.dragging || c.pointerId !== event.pointerId) return; c.handles[c.active] = this.point(event); this.updateConstruction(c); }
+  constructUp(event) { const c = this.construction; if (!c || c.pointerId !== event.pointerId) return; if (!c.dragging) return; c.handles[c.active] = this.point(event); const keys = Object.keys(c.handles), next = keys[keys.indexOf(c.active) + 1]; if (next) { c.active = next; c.dragging = false; c.pointerId = null; this.updateConstruction(c); return; } const drawable = this.constructDrawable(c); this.source.previewDrawable(null); if (drawable) this.source.commitDrawable(drawable); this.construction = null; }
+  constructDrawable(c) { const sampled = c.tool === "arc" ? sampleCircularArc(c.anchors.start, c.anchors.end, c.handles.bend, { sampleCount: 96 }) : sampleCubicBezier(c.anchors.start, c.anchors.end, c.handles.startHandle, c.handles.endHandle, { sampleCount: 96 }); return { kind: "pathStroke", points: sampled.points.map(p => this.map(p, c)), style: clone(c.style) }; }
+  updateConstruction(c) { const drawable = this.constructDrawable(c); this.source.previewDrawable(drawable); c.preview = drawable; }
+  getInteractionGuide() { const c = this.construction; if (!c) return null; const lines = c.anchors.end ? [{ from: c.anchors.start, to: c.anchors.end }] : []; for (const [id, p] of Object.entries(c.handles)) lines.push({ from: id === "endHandle" ? c.anchors.end : c.anchors.start, to: p }); const segments = c.anchors.end ? (c.tool === "arc" ? sampleCircularArc(c.anchors.start, c.anchors.end, c.handles.bend, { sampleCount: 48 }) : sampleCubicBezier(c.anchors.start, c.anchors.end, c.handles.startHandle, c.handles.endHandle, { sampleCount: 48 })).points : []; return { segments, lines, anchors: Object.entries(c.anchors).map(([id, point]) => ({ id, point })), handles: Object.entries(c.handles).map(([id, point]) => ({ id, point })), activeHandle: c.active, stage: c.stage }; }
+}
