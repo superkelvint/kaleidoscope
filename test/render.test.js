@@ -8,8 +8,10 @@ function fakeGl() {
   for (const name of ["createShader","createProgram","createVertexArray","createBuffer","createTexture","createFramebuffer"]) gl[name] = () => ({});
   for (const name of ["shaderSource","compileShader","deleteShader","attachShader","linkProgram","bindVertexArray","bindBuffer","bufferData","enableVertexAttribArray","vertexAttribPointer","bindTexture","texParameteri","pixelStorei","activeTexture","bindFramebuffer","framebufferTexture2D","deleteFramebuffer","deleteTexture","viewport","clearColor","clear","useProgram","uniform1i","uniform2f","uniform1f","drawArrays"]) gl[name] = () => {};
   gl.textureUploads = 0;
+  gl.textureSubUploads = 0;
   gl.drawCalls = 0;
   gl.texImage2D = () => { gl.textureUploads += 1; };
+  gl.texSubImage2D = () => { gl.textureSubUploads += 1; };
   gl.drawArrays = () => { gl.drawCalls += 1; };
   gl.getShaderParameter = () => true; gl.getProgramParameter = () => true; gl.getShaderInfoLog = () => ""; gl.getProgramInfoLog = () => ""; gl.getUniformLocation = () => ({}); gl.getAttribLocation = () => 0;
   return gl;
@@ -88,6 +90,17 @@ test("incremental source revisions preserve feedback and renderer state", () => 
   assert.equal(renderer.syncSourceTexture(), false);
 });
 
+test("updates same-sized source revisions with texSubImage2D", () => {
+  const renderer = createRenderer();
+  let frame = { pixels: {}, width: 20, height: 10, revision: 0 };
+  renderer.setSource({ getFrame: () => frame });
+  const images = renderer.gl.textureUploads;
+  frame = { pixels: {}, width: 20, height: 10, revision: 1 };
+  assert.equal(renderer.syncSourceTexture(), true);
+  assert.equal(renderer.gl.textureUploads, images);
+  assert.equal(renderer.gl.textureSubUploads, 1);
+});
+
 test("re-uploads a source when switching back to it at the same revision", () => {
   const renderer = createRenderer();
   const bitmap = { getFrame: () => ({ pixels: { name: "bitmap" }, width: 20, height: 10, revision: 4 }) };
@@ -108,6 +121,30 @@ test("updates post-processing without scheduling a feedback rebuild", () => {
   renderer.updatePostProcess({ bloomStrength: .5 });
   assert.equal(renderer.getState().bloomStrength, .5);
   assert.equal(renderer.sceneDirty, false);
+});
+
+test("paused renderer is demand-driven instead of continuously scheduling animation frames", () => {
+  const previousRaf = globalThis.requestAnimationFrame, queue = [];
+  let renderer;
+  globalThis.requestAnimationFrame = callback => { queue.push(callback); return queue.length; };
+  try {
+    renderer = createRenderer();
+    renderer.resizeCanvas = () => {};
+    renderer.drawStep = () => {};
+    renderer.present = () => {};
+    renderer.sceneDirty = false;
+    renderer.start();
+    assert.equal(queue.length, 1);
+    queue.shift()(0);
+    assert.equal(queue.length, 0, "an idle paused frame does not schedule another frame");
+    renderer.updateState({ zoom: 1.1 });
+    assert.equal(queue.length, 1, "a state edit wakes one frame");
+    queue.shift()(16);
+    assert.equal(queue.length, 0, "the renderer returns to idle after presenting the edit");
+  } finally {
+    if (renderer?.feedbackRebuildTimer) clearTimeout(renderer.feedbackRebuildTimer);
+    globalThis.requestAnimationFrame = previousRaf;
+  }
 });
 
 test("drawing-source frames are presented through bloom before recording capture", () => {

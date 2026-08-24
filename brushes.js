@@ -1,8 +1,10 @@
 import { brushTextureCatalog } from "./brush-textures.js";
+import { measure } from "./perf.js";
 
 const TAU = Math.PI * 2;
 const TEXTURE_DEBUG_FLAG = "__KALEIDOSCOPE_DEBUG_TEXTURE_BRUSH__";
 const TEXTURE_GRADIENT_STEPS = 32;
+const COMPOUND_PEN_EXPERIMENT_FLAG = "__KALEIDOSCOPE_EXPERIMENTAL_COMPOUND_PEN__";
 
 function parseHexColor(color) {
   const value = typeof color === "string" ? color.trim() : "";
@@ -166,13 +168,87 @@ export function canReplayBrushPath(points, style = {}) {
   return false;
 }
 
+function hasNativePenStyle(options) {
+  return options.brush === "pen" && options.taper !== "sine" && options.colorMode !== "gradient";
+}
+
+function canUseCompoundPen(options) {
+  return hasNativePenStyle(options) && (Number(options.opacity) === 1 || globalThis[COMPOUND_PEN_EXPERIMENT_FLAG] === true);
+}
+
+function replayNativePenContours(ctx, contours, options) {
+  let pathCount = 0;
+  for (const contour of contours) if (contour.points.length > 1 && canReplayBrushPath(contour.points, options)) pathCount += 1;
+  if (!pathCount) return false;
+  measure("Native Pen replay", () => {
+    ctx.save();
+    ctx.globalAlpha = options.opacity;
+    ctx.strokeStyle = options.color;
+    ctx.lineWidth = options.size;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "miter";
+    ctx.miterLimit = 2;
+    measure("Compound Pen path build", () => {
+      ctx.beginPath();
+      for (const contour of contours) {
+        if (contour.points.length <= 1 || !canReplayBrushPath(contour.points, options)) continue;
+        const first = contour.points[0];
+        ctx.moveTo(first.x, first.y);
+        for (let index = 1; index < contour.points.length; index += 1) {
+          const point = contour.points[index];
+          ctx.lineTo(point.x, point.y);
+        }
+        if (contour.closed) ctx.closePath();
+      }
+    });
+    measure("Compound Pen stroke", () => ctx.stroke());
+    ctx.restore();
+  });
+  return true;
+}
+
+/**
+ * Replay a drawable's complete contour set. Brushes decide whether contours
+ * can share a native Canvas path; callers never need generator-specific rules.
+ */
+export function replayBrushContours(ctx, contours, options) {
+  if (!Array.isArray(contours) || !contours.length) return;
+  if (canUseCompoundPen(options)) {
+    replayNativePenContours(ctx, contours, options);
+    // Canvas strokes do not deposit a visible cap for a one-point subpath.
+    // Preserve the prior round-dab behavior for those rare degenerate paths.
+    for (const contour of contours) if (contour.points.length === 1 && canReplayBrushPath(contour.points, options)) penStamp(ctx, contour.points[0], options);
+    return;
+  }
+  for (const contour of contours) {
+    if (canReplayBrushPath(contour.points, options)) replayBrushPath(ctx, contour.points, options, { closed: contour.closed });
+  }
+}
+
 /**
  * Replay a stored source-space path. Unlike the immediate brush API above,
  * this contains no pointer timing: pen taper is a function only of path
  * position and Spray draws from the gesture's stored seed.
  */
-export function replayBrushPath(ctx, points, options) {
+export function replayBrushPath(ctx, points, options, { closed = false } = {}) {
   if (!points?.length) return;
+  // A solid, untapered Pen has the same round-cap deposition as a native
+  // Canvas stroke, without one save/path/fill per sampled point.
+  if (hasNativePenStyle(options) && points.length > 1) {
+    ctx.save();
+    ctx.globalAlpha = options.opacity;
+    ctx.strokeStyle = options.color;
+    ctx.lineWidth = options.size;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let index = 1; index < points.length; index += 1) ctx.lineTo(points[index].x, points[index].y);
+    if (closed) ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
   if (options.brush === "texture") {
     const startedAt = globalThis.performance?.now?.() ?? 0;
     let stampCount = 0;

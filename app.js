@@ -33,6 +33,8 @@ const referenceState = { visible: true, opacity: .5, editing: false, x: 0, y: 0,
 let referencePointer = null;
 let generatorDraft = null;
 let generatorEditorIndex = null;
+let fpsWindowStarted = performance.now();
+let fpsFrameCount = 0;
 
 function requestRecordingFrame() {
   if (!recordingTrack?.requestFrame || mediaRecorder?.state !== "recording") return;
@@ -42,15 +44,24 @@ function requestRecordingFrame() {
   recordingTrack.requestFrame();
 }
 
+function updateFpsMeter() {
+  fpsFrameCount += 1;
+  const now = performance.now(), elapsed = now - fpsWindowStarted;
+  if (elapsed < 500) return;
+  $("fpsMeter").value = `${Math.round(fpsFrameCount * 1000 / elapsed)} FPS`;
+  fpsFrameCount = 0;
+  fpsWindowStarted = now;
+}
+
 const renderer = new Renderer(canvas, {
   onStateChange: syncRendererState,
   onBeforeFrame: state => drawingSource.setTime(state.currentTime),
   onFrame: syncFrame,
   // Canvas capture receives the fully composited frame, including bloom,
   // regardless of whether that frame came from a bitmap or DrawingSource.
-  onPresent: requestRecordingFrame
+  onPresent: () => { requestRecordingFrame(); updateFpsMeter(); }
 });
-const drawingSource = new DrawingSource();
+const drawingSource = new DrawingSource({ onFrameChange: () => renderer.requestRender() });
 const drawingController = new DrawingController({ source: drawingSource, getRendererState: () => renderer.getCurrentMappingState() });
 
 function setPersistenceStatus(message) { $("persistenceStatus").textContent = message; }
@@ -550,6 +561,17 @@ function makeSpirographDraft() {
     style: drawingController.styleSnapshot()
   };
 }
+function makeGuillocheRosetteDraft() {
+  const generator = GENERATORS.guillocheRosette;
+  if (!DRAWING_BRUSHES.includes(drawingController.settings.brush)) drawingController.setBrush("pen");
+  return {
+    kind: "generatedStroke", generator: generator.id, generatorVersion: generator.version,
+    config: structuredClone(generator.defaults),
+    animation: { amount: .5, speed: .15, targets: { phaseOffset: false, secondaryAmplitude: false, secondaryFrequency: false, rotation: false } },
+    placement: { mode: "single", spacing: .9 }, domain: { start: 0, end: generator.period() },
+    sampling: { mode: "parameter", step: .01 }, style: drawingController.styleSnapshot()
+  };
+}
 function editedGenerator() {
   if (!Number.isInteger(generatorEditorIndex) || generatorEditorIndex < 0 || generatorEditorIndex >= drawingSource.historyIndex) return null;
   const operation = drawingSource.history[generatorEditorIndex];
@@ -565,21 +587,26 @@ function activeGenerator() { return generatorDraft || editedGenerator(); }
 function syncGeneratorMotionButton(state = renderer.getState()) {
   const button = $("toggleGeneratorMotion");
   if (button) button.textContent = state.playing ? "Stop motion" : "Start motion";
+  const rosetteButton = $("toggleGuillocheRosetteMotion");
+  if (rosetteButton) rosetteButton.textContent = state.playing ? "Stop motion" : "Start motion";
 }
 function syncGeneratorControls() {
   const drawable = activeGenerator();
   const editing = Boolean(!generatorDraft && drawable);
   if (!drawable) generatorEditorIndex = null;
-  $("drawingGenerator").value = drawable ? "spirograph" : "none";
-  $("spirographControls").hidden = !drawable;
+  $("drawingGenerator").value = drawable?.generator || "none";
+  $("spirographControls").hidden = !drawable || drawable.generator !== "spirograph";
+  $("guillocheRosetteControls").hidden = !drawable || drawable.generator !== "guillocheRosette";
   $("spirographTileSpacingControl").hidden = !drawable || drawable.placement?.mode !== "tile";
   const latestIndex = latestGeneratedIndex();
   $("editLatestGenerator").hidden = Boolean(drawable) || latestIndex === null;
-  $("spirographEditorStatus").textContent = generatorDraft ? "Draft preview — Commit to add it to the drawing." : editing ? "Editing committed Spirograph — changes are saved immediately." : "";
+  $("editLatestGenerator").textContent = `Edit latest ${latestIndex === null ? "generator" : drawingSource.history[latestIndex].drawable.generator === "guillocheRosette" ? "Guilloché Rosette" : "Spirograph"}`;
+  $("spirographEditorStatus").textContent = drawable?.generator === "spirograph" ? (generatorDraft ? "Draft preview — Commit to add it to the drawing." : editing ? "Editing committed Spirograph — changes are saved immediately." : "") : "";
   $("commitGenerator").textContent = editing ? "Done" : "Commit";
   $("resetGenerator").textContent = editing ? "Stop Editing" : "Reset";
   syncGeneratorMotionButton();
   if (!drawable) return;
+  if (drawable.generator === "guillocheRosette") { syncGuillocheRosetteControls(drawable, editing); return; }
   const values = {
     Lobes: [drawable.config.lobes, value => String(Math.round(value))],
     PenOffset: [drawable.config.penOffset, value => Number(value).toFixed(2)],
@@ -623,6 +650,10 @@ $("drawingGenerator").addEventListener("change", event => {
   if (event.target.value === "spirograph") {
     generatorEditorIndex = null;
     generatorDraft = makeSpirographDraft();
+    previewGeneratorDraft();
+  } else if (event.target.value === "guillocheRosette") {
+    generatorEditorIndex = null;
+    generatorDraft = makeGuillocheRosetteDraft();
     previewGeneratorDraft();
   } else resetGeneratorDraft();
   drawDrawingGuides();
@@ -677,6 +708,56 @@ $("commitGenerator").addEventListener("click", () => {
   }
 });
 $("resetGenerator").addEventListener("click", resetGeneratorDraft);
+
+function updateGuillocheRosette(drawable) {
+  if (generatorDraft) { generatorDraft = drawable; previewGeneratorDraft(); }
+  else if (drawingSource.replaceDrawable(generatorEditorIndex, drawable)) { syncGeneratorControls(); scheduleWorkspaceSave(); }
+}
+function syncGuillocheRosetteControls(drawable, editing) {
+  $("guillocheRosetteEditorStatus").textContent = generatorDraft ? "Draft preview — Commit to add it to the drawing." : editing ? "Editing committed Guilloché Rosette — changes are saved immediately." : "";
+  $("commitGuillocheRosette").textContent = editing ? "Done" : "Commit";
+  $("resetGuillocheRosette").textContent = editing ? "Stop Editing" : "Reset";
+  $("toggleGuillocheRosetteMotion").textContent = renderer.getState().playing ? "Stop motion" : "Start motion";
+  const config = { ...GENERATORS.guillocheRosette.defaults, ...drawable.config };
+  const formats = { petals: value => String(Math.round(value)), secondaryFrequency: value => String(Math.round(value)), primaryAmplitude: value => Number(value).toFixed(3), roundness: value => Number(value).toFixed(2), secondaryAmplitude: value => Number(value).toFixed(3), baseRadius: value => Number(value).toFixed(2), rotation: value => `${Math.round(value)}°`, lineCount: value => String(Math.round(value)), lineSpacing: value => Number(value).toFixed(3), phaseOffset: value => `${Math.round(value)}°`, angularModulation: value => Number(value).toFixed(2), angularFrequency: value => String(Math.round(value)) };
+  for (const [key, format] of Object.entries(formats)) {
+    const value = key === "rotation" || key === "phaseOffset" ? config[key] * 180 / Math.PI : config[key];
+    $("guillocheRosette" + key[0].toUpperCase() + key.slice(1)).value = String(value);
+    $("guillocheRosette" + key[0].toUpperCase() + key.slice(1) + "Out").value = format(value);
+  }
+  const placement = drawable.placement || { mode: "single", spacing: .9 };
+  $("guillocheRosettePlacement").value = placement.mode;
+  $("guillocheRosetteTileSpacingControl").hidden = placement.mode !== "tile";
+  $("guillocheRosetteTileSpacing").value = String(placement.spacing);
+  $("guillocheRosetteTileSpacingOut").value = Number(placement.spacing).toFixed(2);
+  for (const key of ["PhaseOffset", "SecondaryAmplitude", "SecondaryFrequency", "Rotation"]) $("guillocheRosetteMotion" + key).checked = drawable.animation.targets[key[0].toLowerCase() + key.slice(1)];
+  $("guillocheRosetteMotion").value = String(drawable.animation.amount);
+  $("guillocheRosetteMotionOut").value = Number(drawable.animation.amount).toFixed(2);
+  $("guillocheRosetteSpeed").value = String(drawable.animation.speed);
+  $("guillocheRosetteSpeedOut").value = `${Number(drawable.animation.speed).toFixed(2)} Hz`;
+}
+const guillocheConfigFields = ["petals", "secondaryFrequency", "primaryAmplitude", "roundness", "secondaryAmplitude", "baseRadius", "lineCount", "lineSpacing", "angularModulation", "angularFrequency"];
+for (const key of guillocheConfigFields) $("guillocheRosette" + key[0].toUpperCase() + key.slice(1)).addEventListener("input", event => {
+  const drawable = structuredClone(activeGenerator()); if (!drawable || drawable.generator !== "guillocheRosette") return;
+  drawable.config[key] = Number(event.target.value); updateGuillocheRosette(drawable);
+});
+for (const key of ["rotation", "phaseOffset"]) $("guillocheRosette" + key[0].toUpperCase() + key.slice(1)).addEventListener("input", event => {
+  const drawable = structuredClone(activeGenerator()); if (!drawable || drawable.generator !== "guillocheRosette") return;
+  drawable.config[key] = Number(event.target.value) * Math.PI / 180; updateGuillocheRosette(drawable);
+});
+for (const [id, key] of [["guillocheRosetteMotion", "amount"], ["guillocheRosetteSpeed", "speed"]]) $(id).addEventListener("input", event => {
+  const drawable = structuredClone(activeGenerator()); if (!drawable || drawable.generator !== "guillocheRosette") return;
+  drawable.animation[key] = Number(event.target.value); updateGuillocheRosette(drawable);
+});
+for (const key of ["phaseOffset", "secondaryAmplitude", "secondaryFrequency", "rotation"]) $("guillocheRosetteMotion" + key[0].toUpperCase() + key.slice(1)).addEventListener("change", event => {
+  const drawable = structuredClone(activeGenerator()); if (!drawable || drawable.generator !== "guillocheRosette") return;
+  drawable.animation.targets[key] = event.target.checked; updateGuillocheRosette(drawable);
+});
+$("guillocheRosettePlacement").addEventListener("change", event => { const drawable = structuredClone(activeGenerator()); if (drawable?.generator === "guillocheRosette") { drawable.placement = { ...(drawable.placement || { spacing: .9 }), mode: event.target.value }; updateGuillocheRosette(drawable); } });
+$("guillocheRosetteTileSpacing").addEventListener("input", event => { const drawable = structuredClone(activeGenerator()); if (drawable?.generator === "guillocheRosette") { drawable.placement = { ...(drawable.placement || { mode: "single" }), spacing: Number(event.target.value) }; updateGuillocheRosette(drawable); } });
+$("toggleGuillocheRosetteMotion").addEventListener("click", () => renderer.updateState({ playing: !renderer.getState().playing }, { preview: false }));
+$("commitGuillocheRosette").addEventListener("click", () => { if (!generatorDraft) { resetGeneratorDraft(); return; } if (drawingSource.commitDrawable(generatorDraft)) { generatorDraft = null; generatorEditorIndex = drawingSource.historyIndex - 1; syncGeneratorControls(); refreshDrawingHistoryControls(); scheduleWorkspaceSave(); } });
+$("resetGuillocheRosette").addEventListener("click", resetGeneratorDraft);
 function syncDrawingBrushControls(name = drawingController.settings.brush) {
   $("drawingRibbonControls").hidden = name !== "ribbon";
   $("drawingCalligraphyControls").hidden = name !== "calligraphy";
@@ -873,7 +954,7 @@ $("stopRecording").addEventListener("click",()=>{if(mediaRecorder?.state!=="inac
 $("save").addEventListener("click",()=>{const a=document.createElement("a");a.download="kaleidoscope.png";a.href=canvas.toDataURL("image/png");a.click();});
 
 document.addEventListener("input",scheduleWorkspaceSave,true); document.addEventListener("change",scheduleWorkspaceSave,true); window.addEventListener("pagehide",saveWorkspaceSettingsNow);
-window.addEventListener("resize", () => drawMirrorWedgeGuides());
+window.addEventListener("resize", () => { drawMirrorWedgeGuides(); renderer.requestRender(); });
 persistenceEnabled=false; const hadSavedSettings=restoreWorkspaceSettings(); populateWallpaperModes(); syncAllControls(); syncTimelineControls(); syncDrawingControls(); syncReferenceControls(); syncGeneratorControls(); refreshDrawingHistoryControls(); persistenceEnabled=true;
 setPersistenceStatus(hadSavedSettings?"Settings restored. Restoring source image...":"Local workspace save enabled."); renderer.start();
 setTimeout(async()=>{try{const result=await bitmapSource.restore();if(result.restored){if(sourceMode==="bitmap")setSourceMode("bitmap");$("dropHint").style.display="none";setPersistenceStatus(result.migrated?"Previous workspace restored and image migrated to IndexedDB.":"Previous workspace restored.");}}catch(error){console.warn("Unable to restore source image",error);setPersistenceStatus("Settings restored; saved source image could not be decoded.");}},0);

@@ -13,6 +13,7 @@ and task-specific plans elsewhere.
 | Bitmap loading/persistence            | `bitmap-source.js`                             |
 | Basic drawing source                  | `drawing-source.js`, then `app.js`             |
 | Canvas2D brush rendering              | `brushes.js`                                   |
+| Development performance telemetry      | `perf.js`                                      |
 | Local motif symmetry mapping          | `local-motif.js`                               |
 | Drawing pointer mapping               | `drawing-mapping.js`                           |
 | Drawing interaction/tools             | `drawing-controller.js`                        |
@@ -52,6 +53,10 @@ Exports `DrawingSource`; owns its offscreen Canvas2D surface, preview
 rasterization, drawable replay, linear history, and frame revision. It remains
 WebGL-free and has no pointer, renderer mapping, tool, or UI state.
 
+Committed time-dependent content uses a static-prefix raster cache: bake only
+the operations before the first time-dependent drawable, then replay that
+drawable and every later operation in order for each time change.
+
 ### Drawing mapping and controller
 
 `local-motif.js` owns the CPU local motif transform and its GLSL counterpart.
@@ -75,6 +80,11 @@ depends on time. Brushes remain contour/path replay only.
 Exports Canvas2D-only brush implementations. Brushes receive mapped source
 coordinates and paint options; they must not depend on pointer events, source
 revisions, renderer state, WebGL, or symmetry mapping.
+
+### `perf.js` — development performance telemetry
+
+Owns debug-gated rolling timing measurement shared by rendering stages. It is
+runtime-only and must stay negligible when the debug flag is disabled.
 
 ### `app.js` — orchestration/UI
 

@@ -20,6 +20,7 @@
     </section>
 
     <aside class="controls">
+      <div class="controlsContent">
       <h1>Kaleidoscope v0.10</h1>
 
       <div class="subhead">Source</div>
@@ -66,6 +67,7 @@
             <select id="drawingGenerator" class="select">
               <option value="none" selected>None</option>
               <option value="spirograph">Spirograph</option>
+              <option value="guillocheRosette">Guilloché Rosette</option>
             </select>
           </div>
           <button id="editLatestGenerator" type="button" hidden>Edit latest Spirograph</button>
@@ -83,6 +85,30 @@
             <div class="row"><div class="rowLabel"><label for="spirographSpeed">Speed</label><output id="spirographSpeedOut">0.15 Hz</output></div><input id="spirographSpeed" type="range" min="0" max="2" step="0.01" value="0.15" /></div>
             <button id="toggleGeneratorMotion" type="button">Start motion</button>
             <div class="sourceButtons"><button id="commitGenerator" type="button">Commit</button><button id="resetGenerator" type="button">Reset</button></div>
+          </div>
+          <div id="guillocheRosetteControls" hidden>
+            <p id="guillocheRosetteEditorStatus" class="drawingHint"></p>
+            <div class="row"><div class="rowLabel"><label for="guillocheRosettePetals">Petals / lobes</label><output id="guillocheRosettePetalsOut">8</output></div><input id="guillocheRosettePetals" type="range" min="1" max="24" step="1" value="8" /></div>
+            <div class="row"><div class="rowLabel"><label for="guillocheRosetteSecondaryFrequency">Secondary frequency</label><output id="guillocheRosetteSecondaryFrequencyOut">13</output></div><input id="guillocheRosetteSecondaryFrequency" type="range" min="1" max="24" step="1" value="13" /></div>
+            <div class="row"><div class="rowLabel"><label for="guillocheRosettePrimaryAmplitude">Primary amplitude</label><output id="guillocheRosettePrimaryAmplitudeOut">0.08</output></div><input id="guillocheRosettePrimaryAmplitude" type="range" min="0" max="0.25" step="0.001" value="0.08" /></div>
+            <div class="row"><div class="rowLabel"><label for="guillocheRosetteRoundness">Roundness</label><output id="guillocheRosetteRoundnessOut">1.00</output></div><input id="guillocheRosetteRoundness" type="range" min="0.35" max="2" step="0.01" value="1" /></div>
+            <div class="row"><div class="rowLabel"><label for="guillocheRosetteSecondaryAmplitude">Secondary amplitude</label><output id="guillocheRosetteSecondaryAmplitudeOut">0.04</output></div><input id="guillocheRosetteSecondaryAmplitude" type="range" min="0" max="0.25" step="0.001" value="0.035" /></div>
+            <div class="row"><div class="rowLabel"><label for="guillocheRosetteBaseRadius">Base radius</label><output id="guillocheRosetteBaseRadiusOut">0.20</output></div><input id="guillocheRosetteBaseRadius" type="range" min="0.05" max="0.48" step="0.01" value="0.2" /></div>
+            <div class="row"><div class="rowLabel"><label for="guillocheRosetteRotation">Rotation</label><output id="guillocheRosetteRotationOut">0°</output></div><input id="guillocheRosetteRotation" type="range" min="0" max="360" step="1" value="0" /></div>
+            <div class="row"><div class="rowLabel"><label for="guillocheRosetteLineCount">Line count</label><output id="guillocheRosetteLineCountOut">18</output></div><input id="guillocheRosetteLineCount" type="range" min="1" max="40" step="1" value="18" /></div>
+            <div class="row"><div class="rowLabel"><label for="guillocheRosetteLineSpacing">Line spacing</label><output id="guillocheRosetteLineSpacingOut">0.006</output></div><input id="guillocheRosetteLineSpacing" type="range" min="0.001" max="0.02" step="0.001" value="0.006" /></div>
+            <div class="row"><div class="rowLabel"><label for="guillocheRosettePhaseOffset">Phase offset</label><output id="guillocheRosettePhaseOffsetOut">0°</output></div><input id="guillocheRosettePhaseOffset" type="range" min="0" max="360" step="1" value="0" /></div>
+            <div class="row"><div class="rowLabel"><label for="guillocheRosetteAngularModulation">Twist / flow</label><output id="guillocheRosetteAngularModulationOut">0.00</output></div><input id="guillocheRosetteAngularModulation" type="range" min="0" max="0.75" step="0.01" value="0" /></div>
+            <div class="row"><div class="rowLabel"><label for="guillocheRosetteAngularFrequency">Angular frequency</label><output id="guillocheRosetteAngularFrequencyOut">3</output></div><input id="guillocheRosetteAngularFrequency" type="range" min="1" max="16" step="1" value="3" /></div>
+            <div class="row"><label for="guillocheRosettePlacement">Rosette Placement</label><select id="guillocheRosettePlacement" class="select"><option value="single" selected>Single</option><option value="tile">Tile</option></select></div>
+            <div id="guillocheRosetteTileSpacingControl" class="row" hidden><div class="rowLabel"><label for="guillocheRosetteTileSpacing">Tile spacing</label><output id="guillocheRosetteTileSpacingOut">0.90</output></div><input id="guillocheRosetteTileSpacing" type="range" min="0.15" max="0.9" step="0.01" value="0.9" /></div>
+            <div class="subhead">Motion</div>
+            <div class="row"><label><input id="guillocheRosetteMotionPhaseOffset" type="checkbox" /> Phase offset</label><label><input id="guillocheRosetteMotionSecondaryAmplitude" type="checkbox" /> Secondary amplitude</label></div>
+            <div class="row"><label><input id="guillocheRosetteMotionSecondaryFrequency" type="checkbox" /> Secondary frequency</label><label><input id="guillocheRosetteMotionRotation" type="checkbox" /> Rotation</label></div>
+            <div class="row"><div class="rowLabel"><label for="guillocheRosetteMotion">Motion</label><output id="guillocheRosetteMotionOut">0.50</output></div><input id="guillocheRosetteMotion" type="range" min="0" max="1" step="0.01" value="0.5" /></div>
+            <div class="row"><div class="rowLabel"><label for="guillocheRosetteSpeed">Speed</label><output id="guillocheRosetteSpeedOut">0.15 Hz</output></div><input id="guillocheRosetteSpeed" type="range" min="0" max="2" step="0.01" value="0.15" /></div>
+            <button id="toggleGuillocheRosetteMotion" type="button">Start motion</button>
+            <div class="sourceButtons"><button id="commitGuillocheRosette" type="button">Commit</button><button id="resetGuillocheRosette" type="button">Reset</button></div>
           </div>
         </details>
         <details id="drawingBrushSection" class="controlSection" open>
@@ -563,6 +589,8 @@
           <div class="row"><label>Phase <output id="motionPhaseOut"></output></label><input id="motionPhase" type="range" min="0" max="1" step="0.01" /></div>
         </div>
       </section>
+      </div>
+      <output id="fpsMeter" class="fpsMeter" aria-live="polite">— FPS</output>
       <dialog id="brushBrowser" class="brushBrowser" aria-labelledby="brushBrowserTitle">
         <div class="brushBrowserHeader">
           <h2 id="brushBrowserTitle">Choose Brush</h2>

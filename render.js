@@ -1,5 +1,6 @@
 import { GLOBAL_WALLPAPER_GLSL, globalWallpaperModeIndex } from "./global-wallpaper.js";
 import { LOCAL_MOTIF_GLSL } from "./local-motif.js";
+import { measure } from "./perf.js";
 
 const VERTEX_SOURCE = `#version 300 es
 layout(location = 0) in vec2 a_position;
@@ -18,7 +19,11 @@ vec2 rotate2d(vec2 p, float a) { float c = cos(a), s = sin(a); return mat2(c, -s
 ${GLOBAL_WALLPAPER_GLSL}
 ${LOCAL_MOTIF_GLSL}
 vec3 hueShift(vec3 color,float hue){float a=hue*TAU,c=cos(a),s=sin(a);mat3 r=mat3(.299+.701*c+.168*s,.587-.587*c+.330*s,.114-.114*c-.497*s,.299-.299*c-.328*s,.587+.413*c+.035*s,.114-.114*c+.292*s,.299-.300*c+1.250*s,.587-.588*c-1.050*s,.114+.886*c-.203*s);return clamp(r*color,0.,1.);}
-void main(){vec2 p=v_uv-u_center;float aspect=u_resolution.x/u_resolution.y;p.x*=aspect;vec2 grid=p;if(u_wallpaperMode!=0)grid=rotate2d(p-u_gridOffset,-u_gridRotation);vec2 q=localMotifPoint(globalWallpaperPoint(grid,u_wallpaperMode,u_wallpaperSize));q=rotate2d(q,u_rotation);q.x/=aspect;q/=max(u_zoom,.001);q+=u_pan+vec2(.5);float imageAspect=u_imageResolution.x/u_imageResolution.y;if(imageAspect>aspect)q.y=(q.y-.5)*(aspect/imageAspect)+.5;else q.x=(q.x-.5)*(imageAspect/aspect)+.5;vec3 fresh=texture(u_image,fract(q)).rgb;
+void main(){// p is isotropic display/symmetry space: one unit is one display-height.
+ vec2 p=v_uv-u_center;float aspect=u_resolution.x/u_resolution.y;p.x*=aspect;vec2 grid=p;if(u_wallpaperMode!=0)grid=rotate2d(p-u_gridOffset,-u_gridRotation);vec2 q=localMotifPoint(globalWallpaperPoint(grid,u_wallpaperMode,u_wallpaperSize));q=rotate2d(q,u_rotation);q/=max(u_zoom,.001);
+ // Convert once from isotropic symmetry space to source UV. Source aspect,
+ // not display aspect, determines the x conversion; pan is already UV-space.
+ float imageAspect=u_imageResolution.x/u_imageResolution.y;q.x/=max(imageAspect,.001);q+=u_pan+vec2(.5);vec3 fresh=texture(u_image,fract(q)).rgb;
  p=v_uv-u_center;p.x*=aspect;p=rotate2d(p,u_feedbackRotation);p/=max(u_feedbackZoom,.001);p.x/=aspect;vec3 prev=texture(u_prev,fract(p+u_center)).rgb;outColor=vec4(hueShift(mix(fresh,prev,u_feedbackAmount),u_hue),1.);}`;
 
 const BLIT_SOURCE = `#version 300 es
@@ -186,10 +191,12 @@ export class Renderer {
     this.source = null;
     this.uploadedSource = null;
     this.uploadedRevision = -1;
+    this.uploadedSourceSize = [0, 0];
     this.imageResolution = [2, 2];
     this.sceneDirty = true;
     this.liveInteractionDirty = false;
     this.feedbackRebuildTimer = null;
+    this.framePending = false;
     this.previousTime = performance.now();
     this.readTarget = null;
     this.writeTarget = null;
@@ -237,7 +244,7 @@ export class Renderer {
   }
   restoreState(snapshot) { this.applySnapshot(snapshot); this.forceSceneRebuild(); this.emitState(); }
   updateState(patch, { preview = true } = {}) { this.applySnapshot(patch); preview ? this.preview() : this.forceSceneRebuild(); this.emitState(); }
-  updatePostProcess(patch) { this.applySnapshot(patch); if (this.readTarget) this.present(); this.emitState(); }
+  updatePostProcess(patch) { this.applySnapshot(patch); if (this.readTarget) this.present(); this.requestRender(); this.emitState(); }
   updateMotion(key, patch) { if (!this.state.motion[key]) return; const next={...this.state.motion[key],...patch}; if(MOTION_SOURCES.has(next.source)) this.state.motion[key]=next; this.preview(); this.emitState(); }
   setSource(source) {
     this.source = source;
@@ -248,15 +255,16 @@ export class Renderer {
     this.clearFeedbackTargets();
     this.forceSceneRebuild();
   }
-  start() { if (this.running) return; this.running = true; requestAnimationFrame(this.render); }
+  start() { if (this.running) return; this.running = true; this.requestRender(); }
+  requestRender() { if (!this.running || this.framePending) return; this.framePending = true; requestAnimationFrame(this.render); }
   seekToTime(time, { pause = false, livePreview = false } = {}) { if (!Number.isFinite(Number(time))) return; this.state.currentTime=Number(time); if(pause)this.state.playing=false; livePreview?this.preview():this.forceSceneRebuild(); this.emitState(); }
   panBy(dx, dy) { this.state.panX -= dx / this.state.zoom; this.state.panY += dy / this.state.zoom; this.preview(); this.emitState(); }
   zoomBy(factor) { this.state.zoom=Math.min(5,Math.max(.2,this.state.zoom*factor)); this.preview(); this.queueFeedbackRebuild(); this.emitState(); }
   beginInteraction() { if(this.feedbackRebuildTimer){clearTimeout(this.feedbackRebuildTimer);this.feedbackRebuildTimer=null;} }
-  endInteraction() { if(this.feedbackRebuildTimer){clearTimeout(this.feedbackRebuildTimer);this.feedbackRebuildTimer=null;} if(this.liveInteractionDirty){this.liveInteractionDirty=false;this.sceneDirty=true;} }
-  preview() { this.sceneDirty=false; this.liveInteractionDirty=true; this.queueFeedbackRebuild(); }
+  endInteraction() { if(this.feedbackRebuildTimer){clearTimeout(this.feedbackRebuildTimer);this.feedbackRebuildTimer=null;} if(this.liveInteractionDirty){this.liveInteractionDirty=false;this.sceneDirty=true;this.requestRender();} }
+  preview() { this.sceneDirty=false; this.liveInteractionDirty=true; this.queueFeedbackRebuild(); this.requestRender(); }
   queueFeedbackRebuild() { clearTimeout(this.feedbackRebuildTimer); this.feedbackRebuildTimer=setTimeout(()=>{this.feedbackRebuildTimer=null;if(this.liveInteractionDirty)this.forceSceneRebuild();},150); }
-  forceSceneRebuild() { if(this.feedbackRebuildTimer){clearTimeout(this.feedbackRebuildTimer);this.feedbackRebuildTimer=null;} this.liveInteractionDirty=false; this.sceneDirty=true; }
+  forceSceneRebuild() { if(this.feedbackRebuildTimer){clearTimeout(this.feedbackRebuildTimer);this.feedbackRebuildTimer=null;} this.liveInteractionDirty=false;this.sceneDirty=true;this.requestRender(); }
   emitState() { this.onStateChange(this.getState()); }
 
   applySnapshot(snapshot = {}) {
@@ -277,11 +285,14 @@ export class Renderer {
 
   uploadSourceTexture(frame) {
     if (!frame?.pixels || !Number.isFinite(frame.width) || !Number.isFinite(frame.height)) return false;
-    const gl=this.gl;
-    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,this.sourceTexture); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
-    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,frame.pixels);
-    this.imageResolution=[frame.width,frame.height];
-    return true;
+    return measure("source texture upload", () => {
+      const gl=this.gl, needsStorage = this.uploadedSource !== this.source || this.uploadedSourceSize[0] !== frame.width || this.uploadedSourceSize[1] !== frame.height;
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,this.sourceTexture); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
+      if (needsStorage) gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,frame.pixels);
+      else gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, frame.pixels);
+      this.imageResolution=[frame.width,frame.height]; this.uploadedSourceSize=[frame.width,frame.height];
+      return true;
+    });
   }
 
   syncSourceTexture() {
@@ -421,11 +432,12 @@ export class Renderer {
   }
   render = now => {
     if (!this.running) return;
+    this.framePending = false;
     this.resizeCanvas();
     const dt = Math.min((now - this.previousTime) / 1000, 0.1);
     this.previousTime = now;
     if (this.state.playing) this.state.currentTime += dt;
-    this.onBeforeFrame(this.getState());
+    if (this.state.playing) this.onBeforeFrame(this.getState());
     const sourceUpdated = this.syncSourceTexture();
     if (this.liveInteractionDirty) {
       this.drawStep(this.state.currentTime);
@@ -445,7 +457,7 @@ export class Renderer {
       this.present();
     }
 
-    requestAnimationFrame(this.render);
+    if (this.state.playing) this.requestRender();
   };
 }
 

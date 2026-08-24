@@ -1,21 +1,29 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { BRUSHES, canReplayBrushPath, colorAtPathPosition, replayBrushPath } from "../brushes.js";
+import { BRUSHES, canReplayBrushPath, colorAtPathPosition, replayBrushContours, replayBrushPath } from "../brushes.js";
 import { brushTextureCatalog } from "../brush-textures.js";
 
 class FakeContext2D {
   constructor() { this.calls = []; }
   set fillStyle(value) { this.calls.push(["fillStyle", value]); }
+  set strokeStyle(value) { this.calls.push(["strokeStyle", value]); }
+  set lineWidth(value) { this.calls.push(["lineWidth", value]); }
+  set lineCap(value) { this.calls.push(["lineCap", value]); }
+  set lineJoin(value) { this.calls.push(["lineJoin", value]); }
   set globalAlpha(value) { this.calls.push(["globalAlpha", value]); }
   save() { this.calls.push(["save"]); }
   restore() { this.calls.push(["restore"]); }
   beginPath() { this.calls.push(["beginPath"]); }
+  moveTo(...args) { this.calls.push(["moveTo", ...args]); }
+  lineTo(...args) { this.calls.push(["lineTo", ...args]); }
+  closePath() { this.calls.push(["closePath"]); }
   arc(...args) { this.calls.push(["arc", ...args]); }
   ellipse(...args) { this.calls.push(["ellipse", ...args]); }
   translate(...args) { this.calls.push(["translate", ...args]); }
   rotate(...args) { this.calls.push(["rotate", ...args]); }
   drawImage(...args) { this.calls.push(["drawImage", ...args]); }
   fill() { this.calls.push(["fill"]); }
+  stroke() { this.calls.push(["stroke"]); }
 }
 
 const options = {
@@ -88,7 +96,28 @@ test("replayed Spray uses its seed and Pen taper uses normalized path position",
 
   const plainPen = new FakeContext2D();
   replayBrushPath(plainPen, path, { ...options, brush: "pen", taper: "none" });
-  assert.deepEqual(plainPen.calls.filter(([name]) => name === "arc").map(call => call[3]), [5, 5, 5]);
+  assert.deepEqual(plainPen.calls.filter(([name]) => name === "moveTo"), [["moveTo", 0, 0]]);
+  assert.deepEqual(plainPen.calls.filter(([name]) => name === "lineTo"), [["lineTo", 10, 0], ["lineTo", 20, 0]]);
+  assert.equal(plainPen.calls.filter(([name]) => name === "stroke").length, 1);
+});
+
+test("eligible Pen contours share one native Canvas path without joining contours", () => {
+  const ctx = new FakeContext2D();
+  replayBrushContours(ctx, [
+    { points: [{ x: 0, y: 0 }, { x: 10, y: 0 }], closed: false },
+    { points: [{ x: 20, y: 0 }, { x: 20, y: 10 }], closed: true }
+  ], { ...options, opacity: 1, brush: "pen", taper: "none", colorMode: "solid" });
+  assert.equal(ctx.calls.filter(([name]) => name === "beginPath").length, 1);
+  assert.equal(ctx.calls.filter(([name]) => name === "stroke").length, 1);
+  assert.deepEqual(ctx.calls.filter(([name]) => name === "moveTo"), [["moveTo", 0, 0], ["moveTo", 20, 0]]);
+  assert.equal(ctx.calls.filter(([name]) => name === "closePath").length, 1);
+  assert.equal(ctx.calls.filter(([name]) => name === "arc").length, 0);
+
+  const gradient = new FakeContext2D();
+  replayBrushContours(gradient, [{ points: [{ x: 0, y: 0 }, { x: 10, y: 0 }], closed: false }], {
+    ...options, brush: "pen", taper: "none", colorMode: "gradient", startColor: "#fff", endColor: "#000"
+  });
+  assert.equal(gradient.calls.filter(([name]) => name === "arc").length, 2, "gradient Pen stays on legacy replay");
 });
 
 test("replay retains timed Spray and Texture hold deposition", () => {

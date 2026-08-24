@@ -21,12 +21,14 @@ export function screenToSourcePoint(event, displayCanvas, rendererState = {}, so
   let grid = screen;
   if (rendererState.wallpaperMode && rendererState.wallpaperMode !== "single") grid = rotateForRenderer({ x: screen.x - (Number(rendererState.gridX) || 0), y: screen.y - (Number(rendererState.gridY) || 0) }, -(Number(rendererState.gridRotationDeg) || 0) * Math.PI / 180);
   const q = localMotifPoint(globalWallpaperPoint(grid, rendererState.wallpaperMode, rendererState.wallpaperSize), rendererState);
+  // q is isotropic display/symmetry space. Convert it once to source UV
+  // using only source aspect; display aspect was consumed to construct screen.
   const source = rotateForRenderer(q, Number(rendererState.rotationRad) || 0);
   const zoom = Math.max(Number(rendererState.zoom) || 1, .001);
-  source.x = source.x / aspect / zoom + (Number(rendererState.panX) || 0) + .5;
-  source.y = source.y / zoom + (Number(rendererState.panY) || 0) + .5;
+  source.x = source.x / zoom;
+  source.y = source.y / zoom;
   const imageAspect = sourceWidth / sourceHeight;
-  if (imageAspect > aspect) source.y = (source.y - .5) * (aspect / imageAspect) + .5;
-  else source.x = (source.x - .5) * (imageAspect / aspect) + .5;
+  source.x = source.x / Math.max(imageAspect, .001) + (Number(rendererState.panX) || 0) + .5;
+  source.y = source.y + (Number(rendererState.panY) || 0) + .5;
   return { x: fract(source.x) * sourceWidth, y: (1 - fract(source.y)) * sourceHeight };
 }
