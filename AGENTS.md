@@ -13,10 +13,13 @@ and task-specific plans elsewhere.
 | Bitmap loading/persistence            | `bitmap-source.js`                             |
 | Basic drawing source                  | `drawing-source.js`, then `app.js`             |
 | Canvas2D brush rendering              | `brushes.js`                                   |
+| Brush texture assets/caching           | `brush-textures.js`, then `brushes.js`         |
 | Development performance telemetry      | `perf.js`                                      |
 | Local motif symmetry mapping          | `local-motif.js`                               |
 | Drawing pointer mapping               | `drawing-mapping.js`                           |
 | Drawing interaction/tools             | `drawing-controller.js`                        |
+| Smart gesture recognition             | `gesture-interpreter.js`                       |
+| Arc/Bezier construction sampling      | `constructed-strokes.js`                       |
 | Procedural drawable geometry          | `drawable-path.js`, then `generators.js`       |
 | Global wallpaper symmetry             | `global-wallpaper.js`                          |
 | New source type                       | source contract below, then `bitmap-source.js` |
@@ -57,6 +60,13 @@ Committed time-dependent content uses a static-prefix raster cache: bake only
 the operations before the first time-dependent drawable, then replay that
 drawable and every later operation in order for each time change.
 
+It also owns generated-motif raster caching for tiled generated strokes. Raster
+the motif once into a tight Canvas2D buffer and blit it at every instance; do
+not derive or brush-replay a copy of the contour for every tile. Missing texture
+assets are loaded through `brushTextureCatalog`; a successful asynchronous load
+rebuilds and rerenders the source. `onFrameChange` only requests presentation—it
+does not turn a source-pixel update into renderer state.
+
 ### Drawing mapping and controller
 
 `local-motif.js` owns the CPU local motif transform and its GLSL counterpart.
@@ -66,14 +76,39 @@ motif, transforms, aspect correction, and Canvas Y inversion.
 and immutable drawable styles; it commits `pathStroke` drawables to
 `DrawingSource`.
 
+`gesture-interpreter.js` is pure display-space smart-gesture recognition and
+canonical gesture sampling. `constructed-strokes.js` is pure display-space arc
+and cubic Bézier sampling. `DrawingController` freezes the renderer mapping at
+gesture start and maps their resulting points to source space; neither helper
+may acquire Canvas, renderer, source, or DOM dependencies.
+
 ### Procedural drawables
 
-`generators.js` contains pure, normalized mathematical recipes and no Canvas,
-DOM, renderer, or persistence concerns. `drawable-path.js` turns durable
-drawables into transient contour paths; it is the only layer that knows how a
-`generatedStroke` executes. `DrawingSource` supplies project time to this
-generic path derivation and rerasterizes only when committed or preview content
-depends on time. Brushes remain contour/path replay only.
+`generators.js` contains pure, normalized mathematical recipes, limits,
+validation, and time-frame helpers—no Canvas, DOM, renderer, or persistence
+concerns. A generator has a stable `id`, a version, defaults, a normalized
+sampler, and a period. Bump its version when changing the durable recipe
+meaning; old `generatedStroke` records are deliberately rejected rather than
+silently reinterpreted.
+
+The current recipes are `spirograph` and `guillocheRosette`. Guilloché rosettes
+are a family of closed contours: the shared frame computes animation once per
+draw, and the geometry blends adjacent *integer* secondary frequencies so a
+motion frame remains closed at its seam. Keep the math normalized and
+deterministic for a given recipe and time.
+
+`drawable-path.js` validates durable `generatedStroke` records, bounds
+parameter sampling, converts normalized geometry to transient pixel-space
+contours, and returns separate placement instances. It is the only layer that
+knows how a `generatedStroke` executes. A durable generated stroke contains its
+generator/version, `config`, `animation`, parameter `domain`/`sampling`,
+`placement`, and immutable brush `style`. Placement is `single` or `tile`; tile
+instances must remain translations, not duplicated contour arrays.
+
+`DrawingSource` supplies project time to generic path derivation and rerenders
+only when committed or preview content depends on time. Brushes remain
+contour/path replay only: they must not contain generator-specific geometry or
+placement logic.
 
 ### `brushes.js` — brush rendering
 
@@ -81,16 +116,34 @@ Exports Canvas2D-only brush implementations. Brushes receive mapped source
 coordinates and paint options; they must not depend on pointer events, source
 revisions, renderer state, WebGL, or symmetry mapping.
 
+### `brush-textures.js` — texture brush resources
+
+Owns the explicit PNG catalog, async decode, alpha-mask normalization,
+thumbnails, and bounded tinted-tip cache used by the `texture` Canvas2D brush.
+It must remain independent of drawing history and UI selection. Keep the asset
+catalog explicit because the native-module app has no build-time asset glob.
+
 ### `perf.js` — development performance telemetry
 
 Owns debug-gated rolling timing measurement shared by rendering stages. It is
 runtime-only and must stay negligible when the debug flag is disabled.
+
+Use `measure(label, work)` around meaningful hot stages rather than adding
+ad-hoc timers. Telemetry is enabled only with
+`globalThis.__KALEIDOSCOPE_DEBUG_PERF__`; it accumulates rolling stats under
+`globalThis.__KALEIDOSCOPE_PERF_TIMINGS__` and must not affect normal behavior.
 
 ### `app.js` — orchestration/UI
 
 Owns DOM/event wiring, control synchronization, active-source selection, pointer
 routing, workspace persistence/status, and export/recording UI. Do not move
 rendering math, GPU work, or source persistence here.
+
+It also owns generator draft/edit UI, reference-image overlay UI, brush-browser
+UI, and presentation-only FPS reporting. Generator drafts are previews; commits
+and edits use `DrawingSource` history APIs. The renderer's `onBeforeFrame`
+advances `DrawingSource` time, while its frame-change callback merely requests a
+render so drawing mutations remain incremental source updates.
 
 ## Source contract
 
@@ -224,6 +277,9 @@ drag/draw interactions so leaving the canvas does not drop the interaction.
 - Renderer controls (symmetry, motion, feedback, bloom, etc.) stay shared across
   source types; `app.js` shows/hides source-specific controls.
 - Workspace settings persist serialized renderer state via `app.js`.
+- Drawing content persists `DrawingSource.getContentState()` and controller
+  settings; generated strokes persist their durable recipes, never sampled
+  contour caches or motif canvases.
 - Bitmap data persists through `BitmapSource` / IndexedDB.
 - Never persist GPU objects, renderer internals, DOM nodes, decoded `Image`
   objects, or transient interaction state.
@@ -258,6 +314,18 @@ For drawing/high-frequency sources also verify:
 - pointer capture survives leaving the canvas
 - fast strokes remain continuous
 - unchanged frames are not repeatedly uploaded
+
+For generators and texture brushes also verify:
+
+- draft preview, commit, edit, undo/redo, and workspace restore preserve the
+  generated recipe and style
+- an animated generator changes with timeline time, while static drawing does
+  not cause a source rerasterization on timeline ticks
+- tiled generated strokes match the single motif and do not regress into a
+  brush replay per tile
+- texture selection survives async asset loading and causes a replay when its
+  mask becomes available
+- Guilloché animation keeps closed contours at its frequency-transition seam
 
 Report what was tested and anything that could not be run.
 
