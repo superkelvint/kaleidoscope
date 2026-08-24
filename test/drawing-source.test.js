@@ -65,3 +65,19 @@ test("replaces an applied drawable without adding a history operation", () => wi
   assert.equal(source.history[0].drawable.config.lobes, 7);
   assert.equal(source.replaceDrawable(2, changed), false);
 }));
+
+test("tiled generated recipes preview, persist, replay, and animate as durable placement state", () => withSource(() => {
+  const source = new DrawingSource({ width: 100, height: 100 });
+  const tiled = generatedDrawable();
+  tiled.placement = { mode: "tile", spacing: .4 };
+  source.previewDrawable(tiled);
+  assert.equal(source.preview.placement.mode, "tile");
+  assert.equal(source.commitDrawable(tiled), true);
+  source.undo(); source.redo();
+  const restored = new DrawingSource({ width: 100, height: 100 });
+  assert.equal(restored.restoreContentState(source.getContentState()), true);
+  assert.deepEqual(restored.history[0].drawable.placement, { mode: "tile", spacing: .4 });
+  const before = restored.revision;
+  assert.equal(restored.setTime(2), true);
+  assert.ok(restored.revision > before);
+}));

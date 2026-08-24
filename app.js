@@ -544,6 +544,7 @@ function makeSpirographDraft() {
     generatorVersion: generator.version,
     config: structuredClone(generator.defaults),
     animation: { amount: .5, speed: .15, phase: 0 },
+    placement: { mode: "single", spacing: .9 },
     domain: { start: 0, end: generator.period() },
     sampling: { mode: "parameter", step: .01 },
     style: drawingController.styleSnapshot()
@@ -571,6 +572,7 @@ function syncGeneratorControls() {
   if (!drawable) generatorEditorIndex = null;
   $("drawingGenerator").value = drawable ? "spirograph" : "none";
   $("spirographControls").hidden = !drawable;
+  $("spirographTileSpacingControl").hidden = !drawable || drawable.placement?.mode !== "tile";
   const latestIndex = latestGeneratedIndex();
   $("editLatestGenerator").hidden = Boolean(drawable) || latestIndex === null;
   $("spirographEditorStatus").textContent = generatorDraft ? "Draft preview — Commit to add it to the drawing." : editing ? "Editing committed Spirograph — changes are saved immediately." : "";
@@ -591,6 +593,10 @@ function syncGeneratorControls() {
     $("spirograph" + name).value = String(value);
     $("spirograph" + name + "Out").value = format(value);
   }
+  const placement = drawable.placement || { mode: "single", spacing: .9 };
+  $("spirographPlacement").value = placement.mode;
+  $("spirographTileSpacing").value = String(placement.spacing);
+  $("spirographTileSpacingOut").value = Number(placement.spacing).toFixed(2);
 }
 function previewGeneratorDraft() {
   drawingSource.setTime(renderer.getState().currentTime);
@@ -648,6 +654,15 @@ $("spirographRotation").addEventListener("input", event => {
   if (generatorDraft) { generatorDraft = drawable; previewGeneratorDraft(); }
   else if (drawingSource.replaceDrawable(generatorEditorIndex, drawable)) { syncGeneratorControls(); scheduleWorkspaceSave(); }
 });
+function updateGeneratorPlacement(patch) {
+  const drawable = structuredClone(activeGenerator());
+  if (!drawable) return;
+  drawable.placement = { ...(drawable.placement || { mode: "single", spacing: .9 }), ...patch };
+  if (generatorDraft) { generatorDraft = drawable; previewGeneratorDraft(); }
+  else if (drawingSource.replaceDrawable(generatorEditorIndex, drawable)) { syncGeneratorControls(); scheduleWorkspaceSave(); }
+}
+$("spirographPlacement").addEventListener("change", event => updateGeneratorPlacement({ mode: event.target.value }));
+$("spirographTileSpacing").addEventListener("input", event => updateGeneratorPlacement({ spacing: Number(event.target.value) }));
 $("toggleGeneratorMotion").addEventListener("click", () => {
   renderer.updateState({ playing: !renderer.getState().playing }, { preview: false });
 });
