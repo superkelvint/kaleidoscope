@@ -132,6 +132,14 @@ function saveWorkspaceSettingsNow() {
   catch (error) { console.warn("Unable to save workspace settings", error); setPersistenceStatus("Browser storage is unavailable; workspace is not being saved."); }
 }
 
+$("resetWorkspace").addEventListener("click", () => {
+  if (!window.confirm("Reset the workspace? This clears saved renderer settings and all drawing history. Your saved source image is kept.")) return;
+  persistenceEnabled = false;
+  clearTimeout(persistenceTimer);
+  localStorage.removeItem(WORKSPACE_STORAGE_KEY);
+  window.location.reload();
+});
+
 function scheduleWorkspaceSave() {
   if (!persistenceEnabled) return;
   clearTimeout(persistenceTimer);
@@ -170,6 +178,7 @@ function populateWallpaperModes() {
 
 function syncRendererState(state) {
   drawingSource.setTime(state.currentTime);
+  syncGeneratorMotionButton(state);
   syncAllControls(state);
   syncTimelineControls(state);
   scheduleWorkspaceSave();
@@ -321,6 +330,10 @@ $("symmetryMode").addEventListener("change", event => renderer.updateState({ sym
 $("wallpaperMode").addEventListener("change", event => renderer.updateState({ wallpaperMode:event.target.value }));
 $("animate").addEventListener("change", event => renderer.updateState({ animate:event.target.checked }));
 $("driftMode").addEventListener("change", event => renderer.updateState({ driftMode:event.target.value }));
+$("resetCanvasDrift").addEventListener("click", () => {
+  renderer.updateState({ driftX: 0, driftY: 0 }, { preview: false });
+  seek(0, { pause: true });
+});
 
 const motionMetadata = { zoom:[0,.75,.01], rotationDeg:[0,180,1], panX:[0,.5,.005], panY:[0,.5,.005], driftX:[0,.08,.001], driftY:[0,.08,.001], feedbackAmount:[0,.98,.01], hue:[0,1,.01], segments:[0,16,1], twist:[0,12,.1] };
 let motionEditorTarget = null;
@@ -548,6 +561,10 @@ function latestGeneratedIndex() {
   return null;
 }
 function activeGenerator() { return generatorDraft || editedGenerator(); }
+function syncGeneratorMotionButton(state = renderer.getState()) {
+  const button = $("toggleGeneratorMotion");
+  if (button) button.textContent = state.playing ? "Stop motion" : "Start motion";
+}
 function syncGeneratorControls() {
   const drawable = activeGenerator();
   const editing = Boolean(!generatorDraft && drawable);
@@ -559,6 +576,7 @@ function syncGeneratorControls() {
   $("spirographEditorStatus").textContent = generatorDraft ? "Draft preview — Commit to add it to the drawing." : editing ? "Editing committed Spirograph — changes are saved immediately." : "";
   $("commitGenerator").textContent = editing ? "Done" : "Commit";
   $("resetGenerator").textContent = editing ? "Stop Editing" : "Reset";
+  syncGeneratorMotionButton();
   if (!drawable) return;
   const values = {
     Lobes: [drawable.config.lobes, value => String(Math.round(value))],
@@ -629,6 +647,9 @@ $("spirographRotation").addEventListener("input", event => {
   drawable.config.rotation = Number(event.target.value) * Math.PI / 180;
   if (generatorDraft) { generatorDraft = drawable; previewGeneratorDraft(); }
   else if (drawingSource.replaceDrawable(generatorEditorIndex, drawable)) { syncGeneratorControls(); scheduleWorkspaceSave(); }
+});
+$("toggleGeneratorMotion").addEventListener("click", () => {
+  renderer.updateState({ playing: !renderer.getState().playing }, { preview: false });
 });
 $("commitGenerator").addEventListener("click", () => {
   if (!generatorDraft) { resetGeneratorDraft(); return; }

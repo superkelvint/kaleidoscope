@@ -79,6 +79,7 @@
             <div class="subhead">Motion</div>
             <div class="row"><div class="rowLabel"><label for="spirographMotion">Motion</label><output id="spirographMotionOut">0.50</output></div><input id="spirographMotion" type="range" min="0" max="1" step="0.01" value="0.5" /></div>
             <div class="row"><div class="rowLabel"><label for="spirographSpeed">Speed</label><output id="spirographSpeedOut">0.15 Hz</output></div><input id="spirographSpeed" type="range" min="0" max="2" step="0.01" value="0.15" /></div>
+            <button id="toggleGeneratorMotion" type="button">Start motion</button>
             <div class="sourceButtons"><button id="commitGenerator" type="button">Commit</button><button id="resetGenerator" type="button">Reset</button></div>
           </div>
         </details>
@@ -193,6 +194,7 @@
         </div>
       </div>
       <div id="persistenceStatus" class="recordingStatus">Local workspace save enabled.</div>
+      <button id="resetWorkspace" type="button">Reset workspace</button>
 
       <div class="presetGroup" hidden>
         <div class="subhead">Presets</div>
@@ -380,6 +382,8 @@
           <input id="driftYNum" class="num" type="number" min="-0.25" max="0.25" step="0.001" value="0.00" />
         </div>
       </div>
+
+      <button id="resetCanvasDrift" type="button">Reset right-drag movement</button>
 
       <div class="row">
         <label>Drift mode</label>
