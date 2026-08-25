@@ -38,9 +38,9 @@ try {
     gl.readPixels(left, bottom, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
     let outputEnergy = 0;
     for (let index = 0; index < pixels.length; index += 4) outputEnergy += pixels[index] + pixels[index + 1] + pixels[index + 2];
-    return { historyCount: drawingSource.getHistoryState().appliedCount, sourceEnergy, outputEnergy };
+    return { operationCount: drawingSource.operationCount, sourceEnergy, outputEnergy };
   });
-  assert.ok(drawnPen.historyCount > 0 && drawnPen.sourceEnergy > 0 && drawnPen.outputEnergy > 100,
+  assert.ok(drawnPen.operationCount > 0 && drawnPen.sourceEnergy > 0 && drawnPen.outputEnergy > 100,
     `a pointer-drawn pen stroke reaches the visible WebGL canvas; ${JSON.stringify(drawnPen)}`);
   const drawingPipeline = await page.evaluate(() => {
     const hooks = window.__KALEIDOSCOPE_TEST_HOOKS__;
@@ -53,8 +53,13 @@ try {
   assert.equal(drawingPipeline.hasPixels, true, "drawing source exposes the Canvas2D pixel frame required by Renderer");
   assert.equal(drawingPipeline.sourceDiagnostics.readPixelsCalls, 0, "drawing does not read WebGL pixels back to CPU");
   assert.equal(await page.locator("#undoDrawing").isDisabled(), false, "drawing commits content to history");
+  const beforeUndo = await page.evaluate(() => window.__KALEIDOSCOPE_TEST_HOOKS__.drawingSource.operationCount);
+  assert.equal(beforeUndo, 1, "the completed drawing is live");
+  assert.equal(await page.locator("#redoDrawing").count(), 0, "Redo control has been removed");
   await page.locator("#undoDrawing").click();
-  await page.locator("#redoDrawing").click();
+  assert.equal(await page.evaluate(() => window.__KALEIDOSCOPE_TEST_HOOKS__.drawingSource.operationCount), 0, "Undo removes the latest drawing");
+  await page.locator("#undoDrawing").click();
+  assert.equal(await page.evaluate(() => window.__KALEIDOSCOPE_TEST_HOOKS__.drawingSource.operationCount), 0, "a second Undo is consumable and does nothing");
   await page.locator("#sourceImage").click();
   await page.locator("#sourceDrawing").click();
   const box = await canvas.boundingBox(); assert.ok(box);

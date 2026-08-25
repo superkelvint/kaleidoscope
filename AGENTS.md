@@ -61,7 +61,7 @@ rasterizer → source frame → renderer`. Read
 more than one drawing boundary.
 
 `drawing-document.js` exports `DrawingDocument`, the durable semantic truth:
-versioned operations with stable IDs, cursor, background, validation, undo/redo,
+versioned operations with stable IDs, background, validation, single-level undo,
 replace-by-ID, destructive clear, and persistence. It owns no Canvas, renderer,
 time, texture, or cache state. Every mutation returns an explicit ChangeSet;
 never make the rasterizer infer changes by comparing snapshots.
@@ -69,8 +69,8 @@ never make the rasterizer infer changes by comparing snapshots.
 `drawing-source.js` exports `DrawingSource` and `DrawingRasterizer`.
 `DrawingSource` is the renderer-facing facade: frame/view/time/preview plus
 document mutation and query APIs. UI code must use `getDrawable`,
-`findLatestDrawable`, and `getHistoryState`; it must never inspect operation
-arrays, cursors, tiles, canvases, or atlas state.
+`findLatestDrawable`, `canUndo`, and `operationCount`; it must never inspect operation
+arrays, tiles, canvases, or atlas state.
 
 `DrawingRasterizer` owns all derived raster state: prepared drawable geometry
 and bounds keyed by operation ID, time-dependent derivation/evaluation, a
@@ -371,7 +371,7 @@ For drawing/high-frequency sources also verify:
 
 For generators and texture brushes also verify:
 
-- draft preview, commit, edit, undo/redo, and workspace restore preserve the
+- draft preview, commit, edit, undo, and workspace restore preserve the
   generated recipe and style
 - an animated generator changes with timeline time, while static drawing does
   not cause a source rerasterization on timeline ticks

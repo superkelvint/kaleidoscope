@@ -8,7 +8,7 @@ display pointer → DrawingController → immutable drawable
 ```
 
 `DrawingDocument` is durable semantic truth. It owns versioned operations,
-stable IDs, cursor, background, validation, and destructive clear. It owns no
+stable IDs, background, validation, single-level undo, and destructive clear. It owns no
 Canvas, time, texture, or renderer state. Mutation methods return a ChangeSet;
 the rasterizer must never discover a change by comparing document snapshots.
 
@@ -38,7 +38,7 @@ permanent Canvas2D architectural constraint.
   magnification while allowing isolated dynamic content and future caches.
 - Texture readiness invalidates only semantics affected by that resource; broad
   cache clears are an implementation fallback, not a contract.
-- `clear()` discards all operations and undo/redo state.
+- `clear()` discards all operations and the single Undo state.
 - Workspace drawing content is schema v1. Earlier workspace keys are ignored.
 
 ## Performance checks

@@ -64,7 +64,7 @@ export class DrawingRasterizer {
     // The renderer's most recent request is diagnostic state. The frame still
     // exposes the larger prepared atlas via atlasOrigin/atlasExtent.
     this.requestedWorldBounds = null; this.requestedPixelSize = null; this.atlasRecenterCount = 0;
-    this.tiles = new Map(); this.history = []; this.historyIndex = 0; this.preview = null;
+    this.tiles = new Map(); this.operations = []; this.preview = null;
     this.backgroundColor = "#000000"; this.time = 0; this.revision = 0; this.onFrameChange = onFrameChange;
     this.pendingTextureReplays = new Set();
     // Bounds are derived cache metadata, never durable drawable state. They
@@ -82,7 +82,7 @@ export class DrawingRasterizer {
   markFrameChanged() { this.revision += 1; this.onFrameChange(); }
   perfMetadata(extra = {}) {
     return {
-      committedHistoryCount: this.historyIndex,
+      committedOperationCount: this.operations.length,
       activePreviewPointCount: this.preview?.points?.length || 0,
       atlasBounds: { left: this.atlasOrigin.x, top: this.atlasOrigin.y, width: this.atlasExtent.width, height: this.atlasExtent.height },
       atlasPixels: { width: this.canvas.width, height: this.canvas.height },
@@ -100,8 +100,7 @@ export class DrawingRasterizer {
   }
   rebuildFrom(view) {
     this.backgroundColor = view.backgroundColor;
-    this.history = view.operations.map(operation => ({ type: "drawable", id: operation.id, drawable: structuredClone(operation.drawable) }));
-    this.historyIndex = view.cursor;
+    this.operations = view.operations.map(operation => ({ type: "drawable", id: operation.id, drawable: structuredClone(operation.drawable) }));
     this.preview = null; this.tiles.clear(); this.preparedDrawables.clear(); this.rebuildBase(); this.invalidateCommittedView(); this.rerender();
   }
   applyChange(change, view) {
@@ -112,37 +111,36 @@ export class DrawingRasterizer {
       return true;
     }
     if (change.type === "background") { this.backgroundColor = change.after; this.invalidateCommittedView(); this.rerender(); return true; }
-    if (change.type === "clear") { this.preview = null; this.history = []; this.historyIndex = 0; this.tiles.clear(); this.preparedDrawables.clear(); this.renderIndex.clear(); this.staticPrefixEnd = 0; this.staticCheckpoints = []; this.invalidateCommittedView(); this.rerender(); return true; }
-    // Replace and cursor moves have non-local z-order effects. Rebuild from the
+    if (change.type === "clear") { this.preview = null; this.operations = []; this.tiles.clear(); this.preparedDrawables.clear(); this.renderIndex.clear(); this.staticPrefixEnd = 0; this.staticCheckpoints = []; this.invalidateCommittedView(); this.rerender(); return true; }
+    // Replacement and undo have non-local z-order effects. Rebuild from the
     // authoritative document rather than guessing from two snapshots.
     this.rebuildFrom(view); return true;
   }
-  setTime(time) { const next = Number(time); if (!Number.isFinite(next) || next === this.time) return false; this.time = next; if (!this.history.slice(0, this.historyIndex).some(op => drawableDependsOnTime(op.drawable)) && !drawableDependsOnTime(this.preview)) return false; this.tiles.clear(); this.rebuildRenderIndex(); this.baseCtx.clearRect(0, 0, this.width, this.height); this.baseCtx.drawImage(this.baseStaticCanvas, 0, 0); for (let i = this.staticPrefixEnd; i < this.historyIndex; i += 1) this.paintOperation(this.history[i], this.baseCtx); this.invalidateCommittedView(); this.rerender(); return true; }
+  setTime(time) { const next = Number(time); if (!Number.isFinite(next) || next === this.time) return false; this.time = next; if (!this.operations.some(op => drawableDependsOnTime(op.drawable)) && !drawableDependsOnTime(this.preview)) return false; this.tiles.clear(); this.rebuildRenderIndex(); this.baseCtx.clearRect(0, 0, this.width, this.height); this.baseCtx.drawImage(this.baseStaticCanvas, 0, 0); for (let i = this.staticPrefixEnd; i < this.operations.length; i += 1) this.paintOperation(this.operations[i], this.baseCtx); this.invalidateCommittedView(); this.rerender(); return true; }
 
   appendOperation(operation) {
-    if (this.historyIndex < this.history.length) this.history.splice(this.historyIndex);
-    this.history.push(operation); this.historyIndex = this.history.length;
+    this.operations.push(operation);
     this.renderIndex.add(operation, this.boundsForOperation(operation));
     const timeDependent = drawableDependsOnTime(operation.drawable);
     if (timeDependent) this.invalidateOperation(operation.drawable);
     else this.appendStaticOperationToCachedTiles(operation);
-    this.staticPrefixEnd = this.history.slice(0, this.historyIndex).findIndex(op => drawableDependsOnTime(op.drawable));
-    if (this.staticPrefixEnd < 0) this.staticPrefixEnd = this.historyIndex;
-    if (["fiber", "hair"].includes(operation.drawable?.style?.brush)) this.staticCheckpoints.push({ index: this.historyIndex, canvas: this.baseStaticCanvas });
+    this.staticPrefixEnd = this.operations.findIndex(op => drawableDependsOnTime(op.drawable));
+    if (this.staticPrefixEnd < 0) this.staticPrefixEnd = this.operations.length;
+    if (["fiber", "hair"].includes(operation.drawable?.style?.brush)) this.staticCheckpoints.push({ index: this.operations.length, canvas: this.baseStaticCanvas });
     if (!timeDependent && this.appendStaticOperationToCommittedView(operation)) {
       this.rerender();
     } else {
       this.invalidateCommittedView(); this.rerender();
     }
   }
-  rebuildBase() { this.tiles.clear(); this.staticPrefixEnd = this.history.slice(0, this.historyIndex).findIndex(op => drawableDependsOnTime(op.drawable)); if (this.staticPrefixEnd < 0) this.staticPrefixEnd = this.historyIndex; this.rebuildRenderIndex(); }
-  rebuildRenderIndex() { this.renderIndex.clear(); for (let index = 0; index < this.historyIndex; index += 1) this.renderIndex.add(this.history[index], this.boundsForOperation(this.history[index])); }
+  rebuildBase() { this.tiles.clear(); this.staticPrefixEnd = this.operations.findIndex(op => drawableDependsOnTime(op.drawable)); if (this.staticPrefixEnd < 0) this.staticPrefixEnd = this.operations.length; this.rebuildRenderIndex(); }
+  rebuildRenderIndex() { this.renderIndex.clear(); for (let index = 0; index < this.operations.length; index += 1) this.renderIndex.add(this.operations[index], this.boundsForOperation(this.operations[index])); }
   invalidateCommittedView() { this.committedDirty = true; }
   appendStaticOperationToCachedTiles(operation) {
     for (const tile of this.tiles.values()) {
       const worldTile = { x: tile.x * TILE_SIZE, y: tile.y * TILE_SIZE, width: TILE_SIZE, height: TILE_SIZE };
       if (!this.operationIntersectsTile(operation, worldTile)) continue;
-      count("Drawing cached tile append", () => this.perfMetadata({ tile: { x: tile.x, y: tile.y }, historyIndex: this.historyIndex - 1 }));
+      count("Drawing cached tile append", () => this.perfMetadata({ tile: { x: tile.x, y: tile.y }, operationIndex: this.operations.length - 1 }));
       this.paintCachedOperation(operation, tile.ctx, worldTile);
     }
   }
@@ -151,7 +149,7 @@ export class DrawingRasterizer {
     const sx = this.canvas.width / width, sy = this.canvas.height / height;
     if (this.committedDirty || !(sx > 1.001 || sy > 1.001)) return false;
     this.paintOperation(operation, this.committedCtx, { transform: { x: -this.atlasOrigin.x, y: -this.atlasOrigin.y, sx, sy } });
-    count("Drawing magnified committed append", () => this.perfMetadata({ historyIndex: this.historyIndex - 1 }));
+    count("Drawing magnified committed append", () => this.perfMetadata({ operationIndex: this.operations.length - 1 }));
     return true;
   }
   invalidateOperation(drawable) {
@@ -192,7 +190,7 @@ export class DrawingRasterizer {
         count("Drawing tile history operation replay", () => this.perfMetadata({ tile: { x, y }, brush: operation.drawable?.style?.brush }));
         this.paintCachedOperation(operation, tile.ctx, { x: x * TILE_SIZE, y: y * TILE_SIZE, width: TILE_SIZE, height: TILE_SIZE });
       }
-    }, () => this.perfMetadata({ tile: { x, y }, replayedOperations: this.historyIndex }));
+    }, () => this.perfMetadata({ tile: { x, y }, replayedOperations: this.operations.length }));
   }
   prepareView({ worldBounds, pixelWidth, pixelHeight } = {}) {
     if (!worldBounds) {
@@ -240,12 +238,8 @@ export class DrawingRasterizer {
     // actual pixel density instead; the regular tile cache remains the fast
     // path when it is sampled at native resolution or smaller.
     if (sx > 1.001 || sy > 1.001) {
-      let first = 0;
-      for (let index = this.historyIndex - 1; index >= 0; index -= 1) {
-        if (this.history[index]?.type === "clear") { first = index + 1; break; }
-      }
-      for (let index = first; index < this.historyIndex; index += 1) {
-        const operation = this.history[index];
+      for (let index = 0; index < this.operations.length; index += 1) {
+        const operation = this.operations[index];
         if (operation?.drawable) this.paintOperation(operation, context, { transform: { x: -x, y: -y, sx, sy } });
       }
     } else for (let ty = floorTile(y); ty <= floorTile(y + height); ty += 1) for (let tx = floorTile(x); tx <= floorTile(x + width); tx += 1) {
@@ -296,10 +290,7 @@ export class DrawingSource {
   get width() { return this.rasterizer.width; }
   get height() { return this.rasterizer.height; }
   get revision() { return this.rasterizer.revision; }
-  // Transitional diagnostics for existing development probes. Application code
-  // must use the document/query API below, never these derived internals.
-  get history() { return this.rasterizer.history; }
-  get historyIndex() { return this.rasterizer.historyIndex; }
+  get operationCount() { return this.document.operationCount; }
   get preview() { return this.rasterizer.preview; }
   get tiles() { return this.rasterizer.tiles; }
   get ctx() { return this.rasterizer.ctx; }
@@ -332,16 +323,15 @@ export class DrawingSource {
   previewDrawable(drawable) { return this.rasterizer.previewDrawable(drawable); }
   getContentState() { return this.document.getContentState(); }
   restoreContentState(state) { const change = this.document.restoreContentState(state); if (!change) return false; this.rasterizer.rebuildFrom(this.document.getRenderView()); return true; }
-  getHistoryState() { return this.document.getHistoryState(); }
-  canUndo() { return this.document.getHistoryState().canUndo; }
-  canRedo() { return this.document.getHistoryState().canRedo; }
+  canUndo() { return this.document.canUndo(); }
   getDrawable(id) { return this.document.getDrawable(id); }
   findLatestDrawable(predicate) { return this.document.findLatest(predicate); }
   commitDrawable(drawable) { const change = this.document.commit(drawable); if (!change) return null; this.rasterizer.applyChange(change, this.document.getRenderView()); return change.id; }
+  beginReplaceAction(id) { return this.document.beginReplaceAction(id); }
+  endReplaceAction() { this.document.endReplaceAction(); }
   replaceDrawable(id, drawable) { const change = this.document.replace(id, drawable); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); return true; }
   setBackgroundColor(color) { const change = this.document.setBackgroundColor(color); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); return true; }
   undo() { const change = this.document.undo(); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); return true; }
-  redo() { const change = this.document.redo(); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); return true; }
   clear() { const change = this.document.clear(); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); return true; }
   perfMetadata(extra) { return this.rasterizer.perfMetadata(extra); }
 }
@@ -357,7 +347,7 @@ export function benchmarkFiberPreview({ committedStrokes = 32, width = 512, heig
     kind: "pathStroke", points: [{ x: 40, y: 156 + offset }, { x: 240, y: 156 + offset }],
     style: { brush: "fiber", version: 2, color: "#ffffff", colorMode: "solid", size: 8, opacity: 1, taper: "none", seed: 73, fibers: .5, gravity: 42, branching: 13, curl: 12, spread: .5, wispiness: .5, assistLevel: .55 }
   });
-  const run = (source, phase) => measure("Drawing Fiber preview benchmark", () => source.previewDrawable(fiber()), () => source.perfMetadata({ phase, committedStrokes: source.getHistoryState().appliedCount, previewLength: 200 }));
+  const run = (source, phase) => measure("Drawing Fiber preview benchmark", () => source.previewDrawable(fiber()), () => source.perfMetadata({ phase, committedStrokes: source.operationCount, previewLength: 200 }));
   const empty = new DrawingSource({ width, height });
   run(empty, "empty");
   const populated = new DrawingSource({ width, height });

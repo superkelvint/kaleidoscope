@@ -153,7 +153,7 @@ function workspaceSnapshot() {
     state: renderer.getState(),
     // Version 12 stores paths in the continuous drawing world. Earlier
     // fixed-bitmap coordinates deliberately are not replayed into it.
-    drawing: { version: 1, settings: drawingController.getState(), content: drawingSource.getContentState() },
+    drawing: { version: 2, settings: drawingController.getState(), content: drawingSource.getContentState() },
     sourceMode,
     showMirrorGuides,
     reference: { visible: referenceState.visible, opacity: referenceState.opacity },
@@ -409,7 +409,7 @@ document.addEventListener("keydown", event => {
   }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
     if (event.target instanceof Element && event.target.closest("input, select, textarea, [contenteditable='true']")) return;
-    const changed = sourceMode === "drawing" && (event.shiftKey ? drawingSource.redo() : drawingSource.undo());
+    const changed = sourceMode === "drawing" && !event.shiftKey && drawingSource.undo();
     if (changed) {
       event.preventDefault();
       refreshDrawingHistoryControls();
@@ -648,6 +648,7 @@ function refreshGeneratorDraftStyle() {
   previewGeneratorDraft();
 }
 function resetGeneratorDraft() {
+  drawingSource.endReplaceAction();
   generatorDraft = null;
   generatorEditorId = null;
   drawingSource.previewDrawable(null);
@@ -655,6 +656,7 @@ function resetGeneratorDraft() {
   renderer.updateState({}, { preview: true });
 }
 $("drawingGenerator").addEventListener("change", event => {
+  drawingSource.endReplaceAction();
   drawingController.cancel();
   if (event.target.value === "spirograph") {
     generatorEditorId = null;
@@ -668,6 +670,7 @@ $("drawingGenerator").addEventListener("change", event => {
   drawDrawingGuides();
 });
 $("editLatestGenerator").addEventListener("click", () => {
+  drawingSource.endReplaceAction();
   const latest = latestGenerated();
   if (!latest) return;
   drawingController.cancel();
@@ -680,19 +683,28 @@ const generatorInputFields = {
   spirographLobes: ["config", "lobes"], spirographPenOffset: ["config", "penOffset"], spirographReach: ["config", "reach"],
   spirographArms: ["config", "arms"], spirographMotion: ["animation", "amount"], spirographSpeed: ["animation", "speed"]
 };
+function replaceEditedGenerator(drawable, { immediate = false } = {}) {
+  if (!generatorEditorId) return false;
+  if (!drawingSource.beginReplaceAction(generatorEditorId)) return false;
+  const changed = drawingSource.replaceDrawable(generatorEditorId, drawable);
+  if (immediate) drawingSource.endReplaceAction();
+  if (changed) { syncGeneratorControls(); refreshDrawingHistoryControls(); scheduleWorkspaceSave(); }
+  return changed;
+}
+function finishGeneratorReplaceAction() { drawingSource.endReplaceAction(); refreshDrawingHistoryControls(); }
 for (const [id, [group, key]] of Object.entries(generatorInputFields)) $(id).addEventListener("input", event => {
   const drawable = structuredClone(activeGenerator());
   if (!drawable) return;
   drawable[group][key] = Number(event.target.value);
   if (generatorDraft) { generatorDraft = drawable; previewGeneratorDraft(); }
-  else if (drawingSource.replaceDrawable(generatorEditorId, drawable)) { syncGeneratorControls(); scheduleWorkspaceSave(); }
+  else replaceEditedGenerator(drawable);
 });
 $("spirographRotation").addEventListener("input", event => {
   const drawable = structuredClone(activeGenerator());
   if (!drawable) return;
   drawable.config.rotation = Number(event.target.value) * Math.PI / 180;
   if (generatorDraft) { generatorDraft = drawable; previewGeneratorDraft(); }
-  else if (drawingSource.replaceDrawable(generatorEditorId, drawable)) { syncGeneratorControls(); scheduleWorkspaceSave(); }
+  else replaceEditedGenerator(drawable);
 });
 $("toggleGeneratorMotion").addEventListener("click", () => {
   renderer.updateState({ playing: !renderer.getState().playing }, { preview: false });
@@ -712,7 +724,7 @@ $("resetGenerator").addEventListener("click", resetGeneratorDraft);
 
 function updateGuillocheRosette(drawable) {
   if (generatorDraft) { generatorDraft = drawable; previewGeneratorDraft(); }
-  else if (drawingSource.replaceDrawable(generatorEditorId, drawable)) { syncGeneratorControls(); scheduleWorkspaceSave(); }
+  else replaceEditedGenerator(drawable);
 }
 function syncGuillocheRosetteControls(drawable, editing) {
   $("guillocheRosetteEditorStatus").textContent = generatorDraft ? "Draft preview — Commit to add it to the drawing." : editing ? "Editing committed Guilloché Rosette — changes are saved immediately." : "";
@@ -747,7 +759,11 @@ for (const [id, key] of [["guillocheRosetteMotion", "amount"], ["guillocheRosett
 });
 for (const key of ["phaseOffset", "secondaryAmplitude", "secondaryFrequency", "rotation"]) $("guillocheRosetteMotion" + key[0].toUpperCase() + key.slice(1)).addEventListener("change", event => {
   const drawable = structuredClone(activeGenerator()); if (!drawable || drawable.generator !== "guillocheRosette") return;
-  drawable.animation.targets[key] = event.target.checked; updateGuillocheRosette(drawable);
+  drawable.animation.targets[key] = event.target.checked;
+  if (generatorDraft) updateGuillocheRosette(drawable); else replaceEditedGenerator(drawable, { immediate: true });
+});
+document.querySelectorAll("#spirographControls input[type='range'], #guillocheRosetteControls input[type='range']").forEach(input => {
+  for (const eventName of ["change", "blur", "pointercancel"]) input.addEventListener(eventName, finishGeneratorReplaceAction);
 });
 $("toggleGuillocheRosetteMotion").addEventListener("click", () => renderer.updateState({ playing: !renderer.getState().playing }, { preview: false }));
 $("commitGuillocheRosette").addEventListener("click", () => { if (!generatorDraft) { resetGeneratorDraft(); return; } const committedId = drawingSource.commitDrawable(generatorDraft); if (committedId) { generatorDraft = null; generatorEditorId = committedId; syncGeneratorControls(); refreshDrawingHistoryControls(); scheduleWorkspaceSave(); } });
@@ -798,7 +814,6 @@ function syncDrawingControls() {
 }
 function refreshDrawingHistoryControls() {
   $("undoDrawing").disabled = !drawingSource.canUndo();
-  $("redoDrawing").disabled = !drawingSource.canRedo();
 }
 $("drawingBrush").addEventListener("change", event => {
   drawingController.setBrush(event.target.value);
@@ -821,7 +836,7 @@ $("drawingSmoothing").addEventListener("input", event => {
 });
 $("drawingColor").addEventListener("input", event => { drawingController.set("color", event.target.value); refreshGeneratorDraftStyle(); });
 function applyDrawingBackgroundColor(value) {
-  drawingSource.setBackgroundColor(value);
+  if (drawingSource.setBackgroundColor(value)) { refreshDrawingHistoryControls(); scheduleWorkspaceSave(); }
 }
 $("drawingBackgroundColor").addEventListener("input", event => applyDrawingBackgroundColor(event.target.value));
 $("drawingBackgroundColor").addEventListener("change", event => applyDrawingBackgroundColor(event.target.value));
@@ -852,7 +867,6 @@ document.querySelectorAll('input[name="drawingTextureRotation"]').forEach(input 
   if (event.target.checked) { drawingController.set("textureRotationMode", event.target.value); refreshGeneratorDraftStyle(); }
 }));
 $("undoDrawing").addEventListener("click", () => { drawingSource.undo(); refreshDrawingHistoryControls(); scheduleWorkspaceSave(); });
-$("redoDrawing").addEventListener("click", () => { drawingSource.redo(); refreshDrawingHistoryControls(); scheduleWorkspaceSave(); });
 $("clearDrawing").addEventListener("click", () => {
   drawingSource.clear();
   seek(0, { pause: true });
