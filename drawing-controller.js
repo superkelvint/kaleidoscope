@@ -6,14 +6,14 @@ import { displayGeometryContext, screenToSourcePoint } from "./drawing-mapping.j
 
 const TAU = Math.PI * 2, CONTINUOUS = { spray: 30, texture: 12 };
 const TOOLS = new Set(["freehand", "smart", "arc", "bezier"]);
-export const DRAWING_BRUSHES = ["pen", "ribbon", "calligraphy", "spray", "texture"];
+export const DRAWING_BRUSHES = ["pen", "ribbon", "calligraphy", "spray", "texture", "fiber", "hair"];
 const clone = value => structuredClone(value);
 
 export class DrawingController {
   constructor({ source, getRendererState = () => ({}) }) {
     this.source = source; this.getRendererState = getRendererState;
-    this.settings = { tool: "freehand", brush: "pen", color: "#ffffff", colorMode: "solid", gradientStartColor: "#ffffff", gradientEndColor: "#ff4da6", size: 8, opacity: .85, lines: 5, span: 24, nibRatio: .22, density: 24, particleSize: 1.5, textureId: DEFAULT_BRUSH_TEXTURE_ID, textureSpacing: .25, textureRotationMode: "followStroke", smoothing: .35 };
-    this.current = null; this.construction = null; this.timer = null;
+    this.settings = { tool: "freehand", brush: "pen", color: "#ffffff", colorMode: "solid", gradientStartColor: "#ffffff", gradientEndColor: "#ff4da6", size: 8, opacity: .85, lines: 5, span: 24, nibRatio: .22, density: 24, particleSize: 1.5, textureId: DEFAULT_BRUSH_TEXTURE_ID, textureSpacing: .25, textureRotationMode: "followStroke", assistLevel: .6, fibers: 6, gravity: 42, branching: 13, curl: 12, spread: .5, wispiness: .5, smoothing: .35 };
+    this.current = null; this.construction = null; this.timer = null; this.previewFrame = null;
   }
   getState() { return clone(this.settings); }
   restoreState(settings) {
@@ -29,7 +29,12 @@ export class DrawingController {
   setTool(tool) { if (TOOLS.has(tool)) { this.cancel(); this.settings.tool = tool; } }
   setBrush(brush) { if (BRUSHES[brush]) this.settings.brush = brush; }
   set(key, value) { if (key in this.settings) this.settings[key] = value; }
-  styleSnapshot() { const s = this.settings; return { brush: s.brush, color: s.color, colorMode: s.colorMode, startColor: s.gradientStartColor, endColor: s.gradientEndColor, size: Number(s.size), opacity: Number(s.opacity), lines: Number(s.lines), span: Number(s.span), nibRatio: Number(s.nibRatio), density: Number(s.density), particleSize: Number(s.particleSize), textureId: s.textureId, spacing: Number(s.textureSpacing), rotationMode: s.textureRotationMode, taper: "none", seed: Math.floor(Math.random() * 0x100000000) }; }
+  styleSnapshot() {
+    const s = this.settings, gradient = s.colorMode === "gradient";
+    // Make a saved style self-consistent. This is deliberately redundant with
+    // brush rendering: no solid stroke may inherit stale endpoint swatches.
+    return { brush: s.brush, version: s.brush === "fiber" || s.brush === "hair" ? 2 : undefined, color: s.color, colorMode: s.colorMode, startColor: gradient ? s.gradientStartColor : s.color, endColor: gradient ? s.gradientEndColor : s.color, size: Number(s.size), opacity: Number(s.opacity), lines: Number(s.lines), span: Number(s.span), nibRatio: Number(s.nibRatio), density: Number(s.density), particleSize: Number(s.particleSize), textureId: s.textureId, spacing: Number(s.textureSpacing), rotationMode: s.textureRotationMode, assistLevel: Number(s.assistLevel), fibers: Number(s.fibers), gravity: Number(s.gravity), branching: Number(s.branching), curl: Number(s.curl), spread: Number(s.spread), wispiness: Number(s.wispiness), taper: "none", seed: Math.floor(Math.random() * 0x100000000) };
+  }
   point(event) { return { x: event.clientX, y: event.clientY }; }
   map(point, current) { return screenToSourcePoint(point, current.canvas, current.mapping, this.source.width, this.source.height); }
   begin(event, canvas) {
@@ -54,15 +59,31 @@ export class DrawingController {
   end(event) {
     if (this.construction) return this.constructUp(event);
     const c = this.current; if (!c || c.pointerId !== event.pointerId) return;
-    this.deposit();
+    this.deposit(); this.flushPreview(c);
     if (this.settings.tool === "smart") { const gesture = interpretGesture(c.displayPoints, c.context); if (gesture) c.points = sampleCanonicalGesture(gesture, this.count(gesture.points, c)).map(p => this.map(p, c)); }
     else if (!event.shiftKey) this.capture(c.last, this.interactionPoint(event, c), c);
     const drawable = { kind: "pathStroke", points: c.points.map(clone), style: clone(c.style) };
     this.source.previewDrawable(null); if (canReplayBrushPath(drawable.points, drawable.style)) this.source.commitDrawable(drawable);
     this.stopContinuous(); this.current = null;
   }
-  cancel(event) { if (event && this.current?.pointerId !== event.pointerId && this.construction?.pointerId !== event.pointerId) return false; const hadInteraction = Boolean(this.current || this.construction); if (!hadInteraction) return false; this.current = null; this.construction = null; this.stopContinuous(); this.source.previewDrawable(null); return true; }
-  preview(c) { this.source.previewDrawable({ kind: "pathStroke", points: c.points.map(clone), style: c.style }); }
+  cancel(event) { if (event && this.current?.pointerId !== event.pointerId && this.construction?.pointerId !== event.pointerId) return false; const hadInteraction = Boolean(this.current || this.construction); if (!hadInteraction) return false; this.cancelPreviewFrame(); this.current = null; this.construction = null; this.stopContinuous(); this.source.previewDrawable(null); return true; }
+  isFiberPreview(c) { return c?.style?.brush === "fiber" || c?.style?.brush === "hair"; }
+  publishPreview(c) { if (this.current !== c) return; this.source.previewDrawable({ kind: "pathStroke", points: c.points.map(clone), style: c.style }); }
+  preview(c) {
+    if (!this.isFiberPreview(c)) return this.publishPreview(c);
+    if (this.previewFrame !== null) return;
+    const schedule = globalThis.requestAnimationFrame || (callback => setTimeout(() => callback(performance.now()), 16));
+    this.previewFrame = schedule(() => { this.previewFrame = null; this.publishPreview(c); });
+  }
+  flushPreview(c) {
+    if (this.previewFrame === null) return;
+    this.cancelPreviewFrame(); this.publishPreview(c);
+  }
+  cancelPreviewFrame() {
+    if (this.previewFrame === null) return;
+    if (globalThis.cancelAnimationFrame) globalThis.cancelAnimationFrame(this.previewFrame); else clearTimeout(this.previewFrame);
+    this.previewFrame = null;
+  }
   capture(a, b, c) { const rect = c.canvas.getBoundingClientRect(), spp = Math.max(this.source.width / Math.max(rect.width, 1), this.source.height / Math.max(rect.height, 1)), steps = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / Math.min(2, Math.max(.5, c.style.size * .2 / spp)))); for (let i = 1; i <= steps; i += 1) { const p = this.map({ x: a.x + (b.x - a.x) * i / steps, y: a.y + (b.y - a.y) * i / steps }, c); this.pushPoint(c.points, p); } }
   pushPoint(points, point) { if (points.length && Math.hypot(point.x - points.at(-1).x, point.y - points.at(-1).y) < .25) return; points.push({ ...point }); if (points.length <= 512) return; const reduced = Array.from({ length: 512 }, (_, i) => { const source = points[Math.round(i * (points.length - 1) / 511)]; return { x: source.x, y: source.y }; }); for (let i = 0; i < points.length; i += 1) { const held = Number(points[i].holdCount) || 0; if (held) { const target = Math.round(i * 511 / (points.length - 1)); reduced[target].holdCount = (Number(reduced[target].holdCount) || 0) + held; } } points.splice(0, points.length, ...reduced); }
   count(points, c) { const rect = c.canvas.getBoundingClientRect(), spp = Math.max(this.source.width / rect.width, this.source.height / rect.height); let length = 0; for (let i = 1; i < points.length; i += 1) length += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y); return Math.min(512, Math.max(points.length, Math.ceil(length / Math.min(2, Math.max(.5, c.style.size * .2 / spp))) + 1)); }

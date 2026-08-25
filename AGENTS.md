@@ -13,6 +13,7 @@ and task-specific plans elsewhere.
 | Bitmap loading/persistence            | `bitmap-source.js`                             |
 | Basic drawing source                  | `drawing-source.js`, then `app.js`             |
 | Canvas2D brush rendering              | `brushes.js`                                   |
+| Assisted Fiber material rendering     | `fiber-brush.js`, then `brushes.js`            |
 | Brush texture assets/caching           | `brush-textures.js`, then `brushes.js`         |
 | Development performance telemetry      | `perf.js`                                      |
 | Local motif symmetry mapping          | `local-motif.js`                               |
@@ -115,6 +116,15 @@ placement logic.
 Exports Canvas2D-only brush implementations. Brushes receive mapped source
 coordinates and paint options; they must not depend on pointer events, source
 revisions, renderer state, WebGL, or symmetry mapping.
+
+### `fiber-brush.js` — assisted Fiber material
+
+Owns the deterministic Canvas2D Fiber recipe: bounded master-path derivation,
+population generation, gradient sampling, lifecycles, fan-out, branches, and
+preview population reduction. It receives an immutable path/style snapshot and
+must remain independent of pointer events, drawing history, renderer state,
+WebGL, and DOM UI. Fiber stroke version, seed, and user controls are persisted
+in the `pathStroke` style and must replay identically.
 
 ### `brush-textures.js` — texture brush resources
 
@@ -294,6 +304,21 @@ Prefer the smallest change that preserves boundaries:
 - no unrelated rendering rewrites during structural refactors
 - do not combine structural and visual changes unless required
 
+## Bug-fix discipline
+
+For a reported defect, do not implement a speculative fix first.
+
+1. Trace the reported behavior through the real owning path, including UI,
+   controller, persistence, and rendering boundaries where applicable.
+2. Add a focused automated regression test that reproduces the reported failure
+   through that path. Run it and confirm it fails for the stated reason.
+3. Implement the smallest fix that makes the new test pass.
+4. Run the focused regression test and all existing tests covering affected
+   behavior.
+5. Do not report a bug fixed solely because unit tests pass when the report is
+   about browser interaction; browser-smoke the exact reported interaction, or
+   explicitly state that it could not be run.
+
 ## Verification
 
 Run existing automated tests covering changed behavior, then browser-smoke the
@@ -328,6 +353,9 @@ For generators and texture brushes also verify:
 - Guilloché animation keeps closed contours at its frequency-transition seam
 
 Report what was tested and anything that could not be run.
+
+For interactive bugs, tests must cover the highest practical integration
+boundary; a renderer-only test does not validate controller/UI wiring.
 
 ## Maintaining this file
 

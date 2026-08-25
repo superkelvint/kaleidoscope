@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { BRUSHES, canReplayBrushPath, colorAtPathPosition, replayBrushContours, replayBrushPath } from "../brushes.js";
 import { brushTextureCatalog } from "../brush-textures.js";
+import { BrushPainter } from "../brush-painter.js";
 
 class FakeContext2D {
   constructor() { this.calls = []; }
@@ -48,6 +49,25 @@ test("directional brushes wait for a valid tangent before their first mark", () 
     BRUSHES[brushName].move(ctx, { x: 10, y: 10 }, { x: 20, y: 20 }, { ...options, tangent: null });
     assert.equal(ctx.calls.length, 0, `${brushName} does not make an arbitrary first mark`);
   }
+});
+
+test("every brush can characterize output as backend-neutral painter primitives", () => {
+  const tipId = "painter-tip", tip = { width: 8, height: 4 };
+  brushTextureCatalog.loaded.set(tipId, { width: 8, height: 4, tints: new Map([["#ffffff", tip]]) });
+  const path = [{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 80, y: 10 }];
+  const styles = {
+    pen: { ...options, brush: "pen", taper: "none" }, ribbon: { ...options, brush: "ribbon" }, calligraphy: { ...options, brush: "calligraphy" },
+    spray: { ...options, brush: "spray", seed: 3 }, texture: { ...options, brush: "texture", textureId: tipId, spacing: .5 },
+    fiber: { ...options, brush: "fiber", version: 2, seed: 3, fibers: .2, gravity: 20, branching: 0, curl: 0, spread: .5, wispiness: .5, assistLevel: .1 },
+    hair: { ...options, brush: "hair", version: 2, seed: 3, fibers: .2, gravity: 20, branching: 0, curl: 0, spread: .5, wispiness: .5, assistLevel: .1 }
+  };
+  for (const [name, style] of Object.entries(styles)) {
+    const instructions = [], painter = new BrushPainter(instruction => instructions.push(instruction));
+    replayBrushPath(painter, path, style);
+    assert.ok(instructions.length, `${name} emits instructions`);
+    assert.ok(instructions.every(instruction => typeof instruction.type === "string"), `${name} has typed primitives`);
+  }
+  brushTextureCatalog.loaded.delete(tipId);
 });
 
 test("calligraphy uses the supplied tangent to orient an elongated nib", () => {

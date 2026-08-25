@@ -64,6 +64,27 @@ const renderer = new Renderer(canvas, {
 const drawingSource = new DrawingSource({ onFrameChange: () => renderer.requestRender() });
 const drawingController = new DrawingController({ source: drawingSource, getRendererState: () => renderer.getCurrentMappingState() });
 
+const DRAWING_CURSOR_BY_BRUSH = {
+  pen: "pen",
+  ribbon: "ribbon",
+  calligraphy: "calligraphy",
+  spray: "spray",
+  texture: "texture",
+  fiber: "fiber",
+  hair: "fiber"
+};
+
+function updateCanvasCursor() {
+  if (sourceMode !== "drawing") {
+    delete canvas.dataset.cursor;
+    return;
+  }
+  const tool = drawingController.settings.tool;
+  canvas.dataset.cursor = tool === "freehand"
+    ? DRAWING_CURSOR_BY_BRUSH[drawingController.settings.brush] || "pen"
+    : tool;
+}
+
 function setPersistenceStatus(message) { $("persistenceStatus").textContent = message; }
 
 function setSourceMode(mode) {
@@ -83,6 +104,7 @@ function setSourceMode(mode) {
   $("sourceDrawing").classList.toggle("active", mode === "drawing");
   $("sourceDrawing").setAttribute("aria-pressed", String(mode === "drawing"));
   $("dropHint").style.display = mode === "bitmap" && !bitmapSource.getFrame() ? "grid" : "none";
+  updateCanvasCursor();
 }
 
 function updateReferenceOverlay() {
@@ -129,7 +151,9 @@ function loadReferenceImage(file) {
 function workspaceSnapshot() {
   return {
     state: renderer.getState(),
-    drawing: { version: 11, settings: drawingController.getState(), content: drawingSource.getContentState() },
+    // Version 12 stores paths in the continuous drawing world. Earlier
+    // fixed-bitmap coordinates deliberately are not replayed into it.
+    drawing: { version: 12, settings: drawingController.getState(), content: drawingSource.getContentState() },
     sourceMode,
     showMirrorGuides,
     reference: { visible: referenceState.visible, opacity: referenceState.opacity },
@@ -168,7 +192,7 @@ function restoreWorkspaceSettings() {
       if (Number.isFinite(opacity)) referenceState.opacity = Math.min(1, Math.max(0, opacity));
     }
     renderer.restoreState(saved.state);
-    if (saved.drawing?.version === 11) { drawingController.restoreState(saved.drawing.settings); drawingSource.restoreContentState(saved.drawing.content); }
+    if (saved.drawing?.version === 12) { drawingController.restoreState(saved.drawing.settings); drawingSource.restoreContentState(saved.drawing.content); }
     if (saved.recordFps === 30 || saved.recordFps === 60) $("recordFps").value = String(saved.recordFps);
     if (saved.sourceMode === "drawing") {
       setSourceMode("drawing");
@@ -763,6 +787,7 @@ function syncDrawingBrushControls(name = drawingController.settings.brush) {
   $("drawingCalligraphyControls").hidden = name !== "calligraphy";
   $("drawingSprayControls").hidden = name !== "spray";
   $("drawingTextureControls").hidden = name !== "texture";
+  $("drawingFiberControls").hidden = name !== "fiber" && name !== "hair";
   syncDrawingColorControls(drawingController.settings.colorMode);
   if (name === "texture") {
     loadCurrentTexture();
@@ -791,6 +816,10 @@ function syncDrawingControls() {
   $("drawingParticleSize").value = String(drawingController.settings.particleSize);
   $("drawingTextureSpacing").value = String(drawingController.settings.textureSpacing);
   $("drawingTextureSpacingOut").value = `${Number(drawingController.settings.textureSpacing).toFixed(2)}×`;
+  $("drawingFibers").value = String(drawingController.settings.fibers);
+  $("drawingFiberGravity").value = String(drawingController.settings.gravity);
+  $("drawingFiberBranching").value = String(drawingController.settings.branching);
+  $("drawingFiberCurl").value = String(drawingController.settings.curl);
   const rotation = document.querySelector(`input[name="drawingTextureRotation"][value="${drawingController.settings.textureRotationMode}"]`);
   if (rotation) rotation.checked = true;
   syncDrawingBrushControls();
@@ -810,10 +839,11 @@ $("drawingBrush").addEventListener("change", event => {
     $("drawingSize").value = "64";
   }
   syncDrawingBrushControls();
+  updateCanvasCursor();
   refreshGeneratorDraftStyle();
   drawDrawingGuides();
 });
-$("drawingTool").addEventListener("change", event => { drawingController.setTool(event.target.value); drawDrawingGuides(); });
+$("drawingTool").addEventListener("change", event => { drawingController.setTool(event.target.value); updateCanvasCursor(); drawDrawingGuides(); });
 $("drawingSmoothing").addEventListener("input", event => {
   const percent = Number(event.target.value);
   drawingController.set("smoothing", percent / 100);
@@ -839,6 +869,10 @@ $("drawingSpan").addEventListener("input", event => { drawingController.set("spa
 $("drawingNibRatio").addEventListener("input", event => { drawingController.set("nibRatio", event.target.value); refreshGeneratorDraftStyle(); });
 $("drawingDensity").addEventListener("input", event => { drawingController.set("density", event.target.value); refreshGeneratorDraftStyle(); });
 $("drawingParticleSize").addEventListener("input", event => { drawingController.set("particleSize", event.target.value); refreshGeneratorDraftStyle(); });
+$("drawingFibers").addEventListener("input", event => { drawingController.set("fibers", event.target.value); refreshGeneratorDraftStyle(); });
+$("drawingFiberGravity").addEventListener("input", event => { drawingController.set("gravity", event.target.value); refreshGeneratorDraftStyle(); });
+$("drawingFiberBranching").addEventListener("input", event => { drawingController.set("branching", event.target.value); refreshGeneratorDraftStyle(); });
+$("drawingFiberCurl").addEventListener("input", event => { drawingController.set("curl", event.target.value); refreshGeneratorDraftStyle(); });
 $("drawingTextureSpacing").addEventListener("input", event => {
   drawingController.set("textureSpacing", event.target.value);
   $("drawingTextureSpacingOut").value = `${Number(event.target.value).toFixed(2)}×`;

@@ -1,5 +1,5 @@
 import { globalWallpaperPoint } from "./global-wallpaper.js";
-import { fract, localMotifPoint, rotateForRenderer } from "./local-motif.js";
+import { localMotifPoint, rotateForRenderer } from "./local-motif.js";
 
 export { rotateForRenderer } from "./local-motif.js";
 
@@ -30,5 +30,7 @@ export function screenToSourcePoint(event, displayCanvas, rendererState = {}, so
   const imageAspect = sourceWidth / sourceHeight;
   source.x = source.x / Math.max(imageAspect, .001) + (Number(rendererState.panX) || 0) + .5;
   source.y = source.y + (Number(rendererState.panY) || 0) + .5;
-  return { x: fract(source.x) * sourceWidth, y: (1 - fract(source.y)) * sourceHeight };
+  // Drawing sources are an unbounded world. Keep the renderer's source-space
+  // calculation intact, but deliberately do not fold it into one bitmap.
+  return { x: source.x * sourceWidth, y: (1 - source.y) * sourceHeight };
 }

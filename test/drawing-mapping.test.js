@@ -32,3 +32,13 @@ test("source aspect fitting preserves bitmap pixel geometry at its matching view
   assert.ok(Math.abs(Math.hypot(horizontal.x - 100, horizontal.y - 50) - 20) < 1e-9);
   assert.ok(Math.abs(Math.hypot(vertical.x - 100, vertical.y - 50) - 20) < 1e-9);
 });
+
+test("drawing coordinates remain continuous beyond the former bitmap seam", () => {
+  const display = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 200, height: 100 }) };
+  const world = { ...state, zoom: .2, panX: 0, panY: 0 };
+  const middle = screenToSourcePoint({ clientX: 100, clientY: 50 }, display, world, 2048, 2048);
+  const right = screenToSourcePoint({ clientX: 200, clientY: 50 }, display, world, 2048, 2048);
+  assert.ok(right.x > 2048, "zoomed-out view reaches a distinct world region");
+  assert.equal(middle.x, 1024);
+  assert.ok(middle.x < right.x, "mapping is monotonic rather than wrapped");
+});

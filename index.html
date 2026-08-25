@@ -130,6 +130,8 @@
             <option value="calligraphy">Calligraphy</option>
             <option value="spray">Spray</option>
             <option value="texture">Texture</option>
+            <option value="fiber">Fiber</option>
+            <option value="hair">Hair</option>
           </select>
         </div>
         <div id="drawingColorModeControl" class="row">
@@ -213,6 +215,15 @@
             <label><input type="radio" name="drawingTextureRotation" value="followStroke" checked /> Follow Stroke</label>
             <label><input type="radio" name="drawingTextureRotation" value="fixed" /> Fixed</label>
           </fieldset>
+        </div>
+        <div id="drawingFiberControls" hidden>
+          <div class="row">
+            <div class="rowLabel"><label for="drawingFiberGravity">Gravity</label></div>
+            <input id="drawingFiberGravity" type="range" min="-100" max="100" value="42" />
+          </div>
+          <div class="row"><label for="drawingFibers">Fibers</label><input id="drawingFibers" type="range" min="2" max="14" value="6" /></div>
+          <div class="row"><label for="drawingFiberBranching">Branching</label><input id="drawingFiberBranching" type="range" min="1" max="80" value="13" /></div>
+          <div class="row"><label for="drawingFiberCurl">Curl</label><input id="drawingFiberCurl" type="range" min="0" max="60" value="12" /></div>
         </div>
         </details>
         <div class="sourceButtons" role="group" aria-label="Drawing history">

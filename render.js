@@ -1,6 +1,8 @@
 import { GLOBAL_WALLPAPER_GLSL, globalWallpaperModeIndex } from "./global-wallpaper.js";
 import { LOCAL_MOTIF_GLSL } from "./local-motif.js";
-import { measure } from "./perf.js";
+import { globalWallpaperPoint } from "./global-wallpaper.js";
+import { localMotifPoint, rotateForRenderer } from "./local-motif.js";
+import { count, measure } from "./perf.js";
 
 const VERTEX_SOURCE = `#version 300 es
 layout(location = 0) in vec2 a_position;
@@ -11,9 +13,9 @@ const FEEDBACK_SOURCE = `#version 300 es
 precision highp float;
 in vec2 v_uv; out vec4 outColor;
 uniform sampler2D u_image, u_prev;
-uniform vec2 u_resolution, u_imageResolution, u_gridOffset, u_pan, u_center;
+uniform vec2 u_resolution, u_imageResolution, u_gridOffset, u_pan, u_center, u_worldOrigin, u_worldExtent, u_worldScale;
 uniform float u_segments, u_wallpaperSize, u_gridRotation, u_twist, u_zoom, u_rotation, u_feedbackAmount, u_feedbackZoom, u_feedbackRotation, u_hue;
-uniform bool u_mirror; uniform int u_symmetryMode, u_wallpaperMode;
+uniform bool u_mirror, u_worldSource; uniform int u_symmetryMode, u_wallpaperMode;
 const float PI = 3.141592653589793; const float TAU = 6.283185307179586;
 vec2 rotate2d(vec2 p, float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c) * p; }
 ${GLOBAL_WALLPAPER_GLSL}
@@ -21,9 +23,12 @@ ${LOCAL_MOTIF_GLSL}
 vec3 hueShift(vec3 color,float hue){float a=hue*TAU,c=cos(a),s=sin(a);mat3 r=mat3(.299+.701*c+.168*s,.587-.587*c+.330*s,.114-.114*c-.497*s,.299-.299*c-.328*s,.587+.413*c+.035*s,.114-.114*c+.292*s,.299-.300*c+1.250*s,.587-.588*c-1.050*s,.114+.886*c-.203*s);return clamp(r*color,0.,1.);}
 void main(){// p is isotropic display/symmetry space: one unit is one display-height.
  vec2 p=v_uv-u_center;float aspect=u_resolution.x/u_resolution.y;p.x*=aspect;vec2 grid=p;if(u_wallpaperMode!=0)grid=rotate2d(p-u_gridOffset,-u_gridRotation);vec2 q=localMotifPoint(globalWallpaperPoint(grid,u_wallpaperMode,u_wallpaperSize));q=rotate2d(q,u_rotation);q/=max(u_zoom,.001);
- // Convert once from isotropic symmetry space to source UV. Source aspect,
- // not display aspect, determines the x conversion; pan is already UV-space.
- float imageAspect=u_imageResolution.x/u_imageResolution.y;q.x/=max(imageAspect,.001);q+=u_pan+vec2(.5);vec3 fresh=texture(u_image,fract(q)).rgb;
+ // Convert once from isotropic symmetry space to source UV. A drawing atlas
+ // has viewport dimensions, so it must use its world scale—not atlas pixels—
+ // for this conversion. Pan is already UV-space.
+ float imageAspect=u_worldSource ? u_worldScale.x/u_worldScale.y : u_imageResolution.x/u_imageResolution.y;q.x/=max(imageAspect,.001);q+=u_pan+vec2(.5);
+ vec2 sourceUV=u_worldSource ? vec2((q.x*u_worldScale.x-u_worldOrigin.x)/u_worldExtent.x,1.-((1.-q.y)*u_worldScale.y-u_worldOrigin.y)/u_worldExtent.y) : fract(q);
+ vec3 fresh=texture(u_image,u_worldSource?clamp(sourceUV,0.,1.):sourceUV).rgb;
  p=v_uv-u_center;p.x*=aspect;p=rotate2d(p,u_feedbackRotation);p/=max(u_feedbackZoom,.001);p.x/=aspect;vec3 prev=texture(u_prev,fract(p+u_center)).rgb;outColor=vec4(hueShift(mix(fresh,prev,u_feedbackAmount),u_hue),1.);}`;
 
 const BLIT_SOURCE = `#version 300 es
@@ -192,6 +197,8 @@ export class Renderer {
     this.uploadedSource = null;
     this.uploadedRevision = -1;
     this.uploadedSourceSize = [0, 0];
+    this.activeSourceTexture = null;
+    this.sourceDiagnostics = { textureUploads: 0, textureSubUploads: 0, gpuTextureUses: 0, readPixelsCalls: 0 };
     this.imageResolution = [2, 2];
     this.sceneDirty = true;
     this.liveInteractionDirty = false;
@@ -207,12 +214,13 @@ export class Renderer {
     const gl = this.gl;
     this.feedbackProgram = createProgram(gl, VERTEX_SOURCE, FEEDBACK_SOURCE);
     this.blitProgram = createProgram(gl, VERTEX_SOURCE, BLIT_SOURCE);
-    this.feedbackUniforms = uniforms(gl, this.feedbackProgram, ["u_image","u_prev","u_resolution","u_imageResolution","u_segments","u_mirror","u_symmetryMode","u_wallpaperMode","u_wallpaperSize","u_gridRotation","u_gridOffset","u_twist","u_zoom","u_rotation","u_pan","u_center","u_feedbackAmount","u_feedbackZoom","u_feedbackRotation","u_hue"]);
+    this.feedbackUniforms = uniforms(gl, this.feedbackProgram, ["u_image","u_prev","u_resolution","u_imageResolution","u_segments","u_mirror","u_symmetryMode","u_wallpaperMode","u_wallpaperSize","u_gridRotation","u_gridOffset","u_twist","u_zoom","u_rotation","u_pan","u_center","u_worldSource","u_worldOrigin","u_worldExtent","u_worldScale","u_feedbackAmount","u_feedbackZoom","u_feedbackRotation","u_hue"]);
     this.blitUniforms = uniforms(gl, this.blitProgram, ["u_tex"]);
     this.vao = createQuad(gl, this.feedbackProgram);
     this.blitVao = createQuad(gl, this.blitProgram);
     this.bloom = new BloomEffect(gl, { scale: 0.5 });
     this.sourceTexture = gl.createTexture();
+    this.activeSourceTexture = this.sourceTexture;
     gl.bindTexture(gl.TEXTURE_2D, this.sourceTexture);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
@@ -222,6 +230,8 @@ export class Renderer {
   }
 
   getState() { return structuredClone(this.state); }
+  /** Stable structural diagnostics for zero-copy source regression tests. */
+  getSourceDiagnostics() { return { ...this.sourceDiagnostics }; }
   getCurrentMappingState() {
     const dynamic = this.dynamic(this.state.currentTime);
     return {
@@ -284,18 +294,33 @@ export class Renderer {
   updateMotionSnapshot(key, patch) { if(!patch||typeof patch!=="object")return; const next={...this.state.motion[key]}; if(MOTION_SOURCES.has(patch.source))next.source=patch.source; for(const f of ["speed","amount","phase"])if(Number.isFinite(Number(patch[f])))next[f]=Number(patch[f]); this.state.motion[key]=next; }
 
   uploadSourceTexture(frame) {
-    if (!frame?.pixels || !Number.isFinite(frame.width) || !Number.isFinite(frame.height)) return false;
-    return measure("source texture upload", () => {
-      const gl=this.gl, needsStorage = this.uploadedSource !== this.source || this.uploadedSourceSize[0] !== frame.width || this.uploadedSourceSize[1] !== frame.height;
-      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,this.sourceTexture); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
-      if (needsStorage) gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,frame.pixels);
-      else gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, frame.pixels);
-      this.imageResolution=[frame.width,frame.height]; this.uploadedSourceSize=[frame.width,frame.height];
+    if (!frame || !Number.isFinite(frame.width) || !Number.isFinite(frame.height)) return false;
+    if (frame.kind === "gpu") {
+      if (!frame.texture) return false;
+      this.activeSourceTexture = frame.texture;
+      this.imageResolution = [frame.width, frame.height]; this.uploadedSourceSize = [frame.width, frame.height]; this.sourceWorld = frame.world || null;
+      this.sourceDiagnostics.gpuTextureUses += 1;
+      count("Renderer GPU source texture use", { revision: frame.revision, width: frame.width, height: frame.height, sourceType: this.source?.constructor?.name || "anonymous" });
       return true;
-    });
+    }
+    if (!frame.pixels) return false;
+    const needsStorage = this.uploadedSource !== this.source || this.uploadedSourceSize[0] !== frame.width || this.uploadedSourceSize[1] !== frame.height;
+    const metadata = { revision: frame.revision, width: frame.width, height: frame.height, storage: needsStorage ? "texImage2D" : "texSubImage2D", sourceType: this.source?.constructor?.name || "anonymous" };
+    count("Renderer source texture upload", metadata);
+    return measure("source texture upload", () => {
+      const gl=this.gl;
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,this.sourceTexture); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
+      if (needsStorage) { gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,frame.pixels); this.sourceDiagnostics.textureUploads += 1; }
+      else { gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, frame.pixels); this.sourceDiagnostics.textureSubUploads += 1; }
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, frame.world?.wrap === "clamp" ? gl.CLAMP_TO_EDGE : gl.REPEAT);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, frame.world?.wrap === "clamp" ? gl.CLAMP_TO_EDGE : gl.REPEAT);
+      this.activeSourceTexture = this.sourceTexture; this.imageResolution=[frame.width,frame.height]; this.uploadedSourceSize=[frame.width,frame.height]; this.sourceWorld=frame.world || null;
+      return true;
+    }, metadata);
   }
 
   syncSourceTexture() {
+    this.prepareSourceView();
     const frame = this.source?.getFrame?.();
     if (!frame) return false;
     if (this.uploadedSource === this.source && this.uploadedRevision === frame.revision) return false;
@@ -304,7 +329,27 @@ export class Renderer {
     this.uploadedRevision = frame.revision;
     return true;
   }
-  resizeCanvas() { const dpr=Math.min(window.devicePixelRatio||1,2), width=Math.round(this.canvas.clientWidth*dpr), height=Math.round(this.canvas.clientHeight*dpr); if(this.canvas.width!==width||this.canvas.height!==height){this.canvas.width=width;this.canvas.height=height;this.resizeTargets(width,height);this.sceneDirty=true;} this.gl.viewport(0,0,this.canvas.width,this.canvas.height); }
+  prepareSourceView() {
+    const scale = this.source?.getWorldScale?.();
+    if (!scale || !this.source?.prepareView) return;
+    const dynamic = this.dynamic(this.state.currentTime), state = this.state;
+    const width = Math.max(1, this.canvas.width || this.canvas.clientWidth || 1), height = Math.max(1, this.canvas.height || this.canvas.clientHeight || 1);
+    let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+    // Sample the inverse lookup over the viewport. Extra margin prevents an
+    // atlas edge from showing during folds/discontinuous symmetry boundaries.
+    for (let iy = 0; iy <= 24; iy += 1) for (let ix = 0; ix <= 24; ix += 1) {
+      let p = { x: ix / 24 - state.centerX, y: iy / 24 - state.centerY }; p.x *= width / height;
+      let grid = p;
+      if (state.wallpaperMode !== "single") grid = rotateForRenderer({ x: p.x - state.gridX, y: p.y - state.gridY }, -state.gridRotationDeg * Math.PI / 180);
+      let q = localMotifPoint(globalWallpaperPoint(grid, state.wallpaperMode, state.wallpaperSize), { ...state, ...dynamic });
+      q = rotateForRenderer(q, dynamic.rotationRad); q.x /= Math.max(scale.width / scale.height, .001); q.x /= dynamic.zoom; q.y /= dynamic.zoom; q.x += dynamic.panX + .5; q.y += dynamic.panY + .5;
+      const x = q.x * scale.width, y = (1 - q.y) * scale.height;
+      left = Math.min(left, x); right = Math.max(right, x); top = Math.min(top, y); bottom = Math.max(bottom, y);
+    }
+    const margin = Math.max(scale.width / width, scale.height / height) * 4;
+    this.source.prepareView({ worldBounds: { left: left - margin, top: top - margin, right: right + margin, bottom: bottom + margin }, pixelWidth: width, pixelHeight: height });
+  }
+  resizeCanvas() { const dpr=Math.min(window.devicePixelRatio||1,2), width=Math.round(this.canvas.clientWidth*dpr), height=Math.round(this.canvas.clientHeight*dpr); if(this.canvas.width!==width||this.canvas.height!==height||!this.readTarget||!this.writeTarget){this.canvas.width=width;this.canvas.height=height;this.resizeTargets(width,height);this.sceneDirty=true;} this.gl.viewport(0,0,this.canvas.width,this.canvas.height); }
   createTarget(width,height) { const gl=this.gl, texture=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,texture); for(const [p,v] of [[gl.TEXTURE_MIN_FILTER,gl.LINEAR],[gl.TEXTURE_MAG_FILTER,gl.LINEAR],[gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE],[gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE]])gl.texParameteri(gl.TEXTURE_2D,p,v); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,width,height,0,gl.RGBA,gl.UNSIGNED_BYTE,null); const framebuffer=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,framebuffer);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,texture,0);return{texture,framebuffer,width,height}; }
   resizeTargets(width,height) { this.deleteTarget(this.readTarget);this.deleteTarget(this.writeTarget);this.readTarget=this.createTarget(width,height);this.writeTarget=this.createTarget(width,height);this.bloom.resize(width,height);this.clearFeedbackTargets(); }
   deleteTarget(target) { if(!target)return;this.gl.deleteFramebuffer(target.framebuffer);this.gl.deleteTexture(target.texture); }
@@ -366,7 +411,7 @@ export class Renderer {
     gl.viewport(0, 0, target.width, target.height);
 
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.sourceTexture);
+    gl.bindTexture(gl.TEXTURE_2D, this.activeSourceTexture);
     gl.uniform1i(uniforms.u_image, 0);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, this.readTarget.texture);
@@ -374,6 +419,11 @@ export class Renderer {
 
     gl.uniform2f(uniforms.u_resolution, this.canvas.width, this.canvas.height);
     gl.uniform2f(uniforms.u_imageResolution, ...this.imageResolution);
+    const world = this.sourceWorld;
+    gl.uniform1i(uniforms.u_worldSource, world ? 1 : 0);
+    gl.uniform2f(uniforms.u_worldOrigin, world?.origin?.x || 0, world?.origin?.y || 0);
+    gl.uniform2f(uniforms.u_worldExtent, world?.extent?.width || 1, world?.extent?.height || 1);
+    gl.uniform2f(uniforms.u_worldScale, world?.scale?.width || 1, world?.scale?.height || 1);
     gl.uniform1f(uniforms.u_segments, dynamic.segments);
     gl.uniform1i(uniforms.u_mirror, state.mirror ? 1 : 0);
     gl.uniform1i(uniforms.u_symmetryMode, Math.max(0, SYMMETRY_MODES.indexOf(state.symmetryMode)));

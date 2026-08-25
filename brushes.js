@@ -1,5 +1,7 @@
 import { brushTextureCatalog } from "./brush-textures.js";
 import { measure } from "./perf.js";
+import { renderFiberPath } from "./fiber-brush.js";
+import { BrushPainter, toBrushPainter } from "./brush-painter.js";
 
 const TAU = Math.PI * 2;
 const TEXTURE_DEBUG_FLAG = "__KALEIDOSCOPE_DEBUG_TEXTURE_BRUSH__";
@@ -33,64 +35,36 @@ export function colorAtPathPosition(style, position) {
   return `#${hexComponent(start.r + (end.r - start.r) * amount)}${hexComponent(start.g + (end.g - start.g) * amount)}${hexComponent(start.b + (end.b - start.b) * amount)}`;
 }
 
-function withPaint(ctx, options, paint) {
-  ctx.save();
-  ctx.globalAlpha = options.opacity;
-  ctx.fillStyle = options.color;
-  paint();
-  ctx.restore();
-}
+function roundStamp(target, point, radius, options) { toBrushPainter(target).circle(point.x, point.y, radius, { color: options.color, opacity: options.opacity }); }
 
-function roundStamp(ctx, point, radius) {
-  ctx.beginPath();
-  ctx.arc(point.x, point.y, radius, 0, TAU);
-  ctx.fill();
-}
-
-function ribbonStamp(ctx, point, options) {
+function ribbonStamp(target, point, options) {
   const direction = options.tangent;
   const normal = { x: -direction.y, y: direction.x };
   const lines = Math.max(1, Math.round(options.lines));
   const span = Math.max(0, options.span);
-  withPaint(ctx, options, () => {
-    for (let index = 0; index < lines; index += 1) {
-      const offset = lines === 1 ? 0 : (index / (lines - 1) - 0.5) * span;
-      roundStamp(ctx, { x: point.x + normal.x * offset, y: point.y + normal.y * offset }, options.size / 2);
-    }
-  });
+  for (let index = 0; index < lines; index += 1) {
+    const offset = lines === 1 ? 0 : (index / (lines - 1) - 0.5) * span;
+    roundStamp(target, { x: point.x + normal.x * offset, y: point.y + normal.y * offset }, options.size / 2, options);
+  }
 }
 
-function calligraphyStamp(ctx, point, options) {
+function calligraphyStamp(target, point, options) {
   const direction = options.tangent;
-  withPaint(ctx, options, () => {
-    ctx.translate(point.x, point.y);
-    ctx.rotate(Math.atan2(direction.y, direction.x));
-    ctx.beginPath();
-    ctx.ellipse(0, 0, options.size / 2, options.size * options.nibRatio / 2, 0, 0, TAU);
-    ctx.fill();
-  });
+  toBrushPainter(target).ellipse(point.x, point.y, options.size / 2, options.size * options.nibRatio / 2, Math.atan2(direction.y, direction.x), { color: options.color, opacity: options.opacity });
 }
 
-function sprayStamp(ctx, point, options) {
+function sprayStamp(target, point, options) {
   const radius = options.size / 2;
   const random = options.random || Math.random;
-  withPaint(ctx, options, () => {
-    for (let index = 0; index < options.density; index += 1) {
-      const angle = random() * TAU;
-      const distance = Math.sqrt(random()) * radius;
-      roundStamp(ctx, {
-        x: point.x + Math.cos(angle) * distance,
-        y: point.y + Math.sin(angle) * distance
-      }, options.particleSize / 2);
-    }
-  });
+  for (let index = 0; index < options.density; index += 1) {
+    const angle = random() * TAU, distance = Math.sqrt(random()) * radius;
+    roundStamp(target, { x: point.x + Math.cos(angle) * distance, y: point.y + Math.sin(angle) * distance }, options.particleSize / 2, options);
+  }
 }
 
-function penStamp(ctx, point, options) {
-  withPaint(ctx, options, () => roundStamp(ctx, point, options.size / 2));
-}
+function penStamp(target, point, options) { roundStamp(target, point, options.size / 2, options); }
 
-function textureStamp(ctx, point, options) {
+function textureStamp(target, point, options) {
   const tip = brushTextureCatalog.getTintedTip(options.textureId, options.color);
   if (!tip) return false;
   const largest = Math.max(tip.width, tip.height, 1);
@@ -98,12 +72,7 @@ function textureStamp(ctx, point, options) {
   const angle = options.rotationMode === "followStroke" && options.tangent
     ? Math.atan2(options.tangent.y, options.tangent.x)
     : 0;
-  ctx.save();
-  ctx.translate(point.x, point.y);
-  ctx.rotate(angle);
-  ctx.globalAlpha = options.opacity;
-  ctx.drawImage(tip, -tip.width * scale / 2, -tip.height * scale / 2, tip.width * scale, tip.height * scale);
-  ctx.restore();
+  toBrushPainter(target).image(tip, point.x, point.y, tip.width * scale, tip.height * scale, angle, { opacity: options.opacity });
   return true;
 }
 
@@ -135,7 +104,9 @@ export const BRUSHES = {
   ribbon: directionalBrush(ribbonStamp),
   calligraphy: directionalBrush(calligraphyStamp),
   spray: immediateBrush(sprayStamp),
-  texture: immediateBrush(textureStamp)
+  texture: immediateBrush(textureStamp),
+  fiber: { begin() {}, move() {}, end() {} },
+  hair: { begin() {}, move() {}, end() {} }
 };
 
 /** A small deterministic generator for replaying a stored spray gesture. */
@@ -160,6 +131,7 @@ function tangentBetween(from, to, previous, maxDistance) {
 /** Whether replay can produce a mark for the stored path and brush style. */
 export function canReplayBrushPath(points, style = {}) {
   if (!points?.length) return false;
+  if (style.brush === "fiber" || style.brush === "hair") return points.length > 1;
   if (style.brush !== "ribbon" && style.brush !== "calligraphy") return true;
   const maxTangentDistance = Math.max(Number(style.size) * 6 || 0, 64);
   for (let index = 1; index < points.length; index += 1) {
@@ -213,7 +185,7 @@ function replayNativePenContours(ctx, contours, options) {
  */
 export function replayBrushContours(ctx, contours, options) {
   if (!Array.isArray(contours) || !contours.length) return;
-  if (canUseCompoundPen(options)) {
+  if (!(ctx instanceof BrushPainter) && canUseCompoundPen(options)) {
     replayNativePenContours(ctx, contours, options);
     // Canvas strokes do not deposit a visible cap for a one-point subpath.
     // Preserve the prior round-dab behavior for those rare degenerate paths.
@@ -232,8 +204,16 @@ export function replayBrushContours(ctx, contours, options) {
  */
 export function replayBrushPath(ctx, points, options, { closed = false } = {}) {
   if (!points?.length) return;
+  if (options.brush === "fiber" || options.brush === "hair") {
+    renderFiberPath(ctx, points, options, { preview: options.preview === true });
+    return;
+  }
   // A solid, untapered Pen has the same round-cap deposition as a native
   // Canvas stroke, without one save/path/fill per sampled point.
+  if (hasNativePenStyle(options) && points.length > 1 && ctx instanceof BrushPainter) {
+    ctx.polyline(points, { color: options.color, opacity: options.opacity, width: options.size, cap: "round", join: "round", closed });
+    return;
+  }
   if (hasNativePenStyle(options) && points.length > 1) {
     ctx.save();
     ctx.globalAlpha = options.opacity;

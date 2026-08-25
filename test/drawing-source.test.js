@@ -18,6 +18,10 @@ class FakeContext2D {
 class FakeOffscreenCanvas { constructor(width, height) { this.width = width; this.height = height; this.context = new FakeContext2D(); } getContext() { return this.context; } }
 function withSource(run) { const previous = globalThis.OffscreenCanvas; globalThis.OffscreenCanvas = FakeOffscreenCanvas; try { run(); } finally { globalThis.OffscreenCanvas = previous; } }
 const drawable = () => ({ kind: "pathStroke", points: [{ x: 10, y: 10 }, { x: 20, y: 20 }], style: { brush: "pen", color: "#fff", colorMode: "solid", size: 4, opacity: 1, taper: "none", seed: 1 } });
+const fiberDrawable = (offset = 0) => ({
+  kind: "pathStroke", points: [{ x: 20, y: 50 + offset }, { x: 220, y: 50 + offset }],
+  style: { ...drawable().style, brush: "fiber", version: 2, size: 8, seed: 37, fibers: .5, gravity: 42, branching: 13, curl: 12, spread: .5, wispiness: .5, assistLevel: .55 }
+});
 const generatedDrawable = () => ({ kind: "generatedStroke", generator: "spirograph", generatorVersion: 1, config: { lobes: 5, penOffset: 1.2, reach: .1, rotation: 0, phase: 0, arms: 1 }, animation: { amount: .5, speed: .15, phase: 0 }, domain: { start: 0, end: Math.PI * 2 }, sampling: { mode: "parameter", step: .01 }, style: drawable().style });
 const animatedRosette = () => ({ kind: "generatedStroke", generator: "guillocheRosette", generatorVersion: 1, config: { petals: 8, secondaryFrequency: 13, primaryAmplitude: .08, secondaryAmplitude: .035, baseRadius: .2, rotation: 0, lineCount: 2, lineSpacing: .006, phaseOffset: 0 }, animation: { amount: .5, speed: .15, targets: { phaseOffset: true, secondaryAmplitude: false, secondaryFrequency: false, rotation: false } }, domain: { start: 0, end: Math.PI * 2 }, sampling: { mode: "parameter", step: .01 }, style: drawable().style });
 
@@ -33,6 +37,25 @@ test("commits immutable drawables, keeps previews out of history, and exposes so
   assert.deepEqual(Object.keys(source.getContentState()).sort(), ["backgroundColor", "history", "historyIndex"]);
 }));
 
+test("a persisted clear drops unreachable Fiber history while in-session undo remains available", () => withSource(() => {
+  const source = new DrawingSource({ width: 100, height: 100 });
+  const fiber = { ...drawable(), points: Array.from({ length: 512 }, (_, index) => ({ x: index, y: index % 80 })), style: { ...drawable().style, brush: "fiber", version: 2, fibers: 6, gravity: 42, branching: 13, curl: 12, spread: .5, wispiness: .5, assistLevel: .6 } };
+  source.commitDrawable(fiber);
+  source.clear();
+  assert.equal(source.canUndo(), true, "the live session can still undo clear");
+  assert.deepEqual(source.getContentState().history, []);
+  assert.equal(source.getContentState().historyIndex, 0);
+}));
+
+test("a magnified atlas replays committed paths at view resolution instead of enlarging tile pixels", () => withSource(() => {
+  const source = new DrawingSource({ width: 100, height: 100 });
+  source.commitDrawable(drawable());
+  source.committedCtx.calls.length = 0;
+  source.prepareView({ worldBounds: { left: 0, top: 0, right: 50, bottom: 50 }, pixelWidth: 200, pixelHeight: 200 });
+  assert.ok(source.committedCtx.calls.some(([name]) => name === "stroke"), "committed path is rerasterized into the magnified atlas");
+  assert.equal(source.committedCtx.calls.some(([name]) => name === "drawImage"), false, "the low-resolution tile is not enlarged");
+}));
+
 test("linear undo/redo, branch, clear, and content restore replay drawable operations", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
   source.commitDrawable(drawable()); source.clear();
@@ -44,6 +67,25 @@ test("linear undo/redo, branch, clear, and content restore replay drawable opera
   assert.equal(restored.restoreContentState(state), true);
   assert.deepEqual(restored.getContentState(), state);
   assert.deepEqual(derivePath(drawable()).contours[0].points, drawable().points);
+}));
+
+test("undo resumes from a Fiber raster checkpoint instead of replaying the Fiber", () => withSource(() => {
+  const source = new DrawingSource({ width: 100, height: 100 });
+  const fiber = () => ({
+    kind: "pathStroke",
+    points: [{ x: 10, y: 10 }, { x: 90, y: 70 }],
+    style: { ...drawable().style, brush: "fiber", version: 2, fibers: .5, gravity: 42, branching: 13, curl: 12, spread: .5, wispiness: .5, assistLevel: .5 }
+  });
+  source.commitDrawable(drawable());
+  source.commitDrawable(fiber());
+  source.commitDrawable({ ...drawable(), points: [{ x: 60, y: 10 }, { x: 80, y: 30 }] });
+  assert.equal(source.staticCheckpoints.at(-1).index, 2);
+
+  let replays = 0;
+  const paintOperation = source.paintOperation.bind(source);
+  source.paintOperation = (...args) => { replays += 1; return paintOperation(...args); };
+  source.undo();
+  assert.equal(replays, 0, "the cached raster already contains the remaining Fiber stroke");
 }));
 
 test("content restore rejects drawables with non-finite source coordinates", () => withSource(() => {
@@ -73,6 +115,42 @@ test("animated previews rerender without rebuilding static committed artwork", (
   source.rebuildBase = () => { rebuilds += 1; rebuildBase(); };
   assert.equal(source.setTime(1), true);
   assert.equal(rebuilds, 0);
+}));
+
+test("a fixed-view live Fiber preview never replays committed artwork", () => withSource(() => {
+  const preview = fiberDrawable();
+  const run = committedCount => {
+    const source = new DrawingSource({ width: 512, height: 512 });
+    for (let index = 0; index < committedCount; index += 1) source.commitDrawable(fiberDrawable((index % 20) * 12));
+    assert.equal(source.prepareView({ worldBounds: { left: 0, top: 0, right: 512, bottom: 512 }, pixelWidth: 512, pixelHeight: 512 }), false, "the paused renderer view is unchanged");
+    source.ctx.calls.length = 0;
+    let committedCompositions = 0, tileRebuilds = 0, cachedReplays = 0;
+    const painted = [];
+    const composeCommittedAtlas = source.composeCommittedAtlas.bind(source), rebuildTile = source.rebuildTile.bind(source), paintCachedOperation = source.paintCachedOperation.bind(source), paintDrawable = source.paintDrawable.bind(source);
+    source.composeCommittedAtlas = (...args) => { committedCompositions += 1; return composeCommittedAtlas(...args); };
+    source.rebuildTile = (...args) => { tileRebuilds += 1; return rebuildTile(...args); };
+    source.paintCachedOperation = (...args) => { cachedReplays += 1; return paintCachedOperation(...args); };
+    source.paintDrawable = (next, ...args) => { painted.push(next); return paintDrawable(next, ...args); };
+    source.previewDrawable(preview);
+    assert.equal(committedCompositions, 0);
+    assert.equal(tileRebuilds, 0);
+    assert.equal(cachedReplays, 0);
+    assert.equal(source.committedDirty, false);
+    assert.deepEqual(painted.map(next => next.points), [preview.points], "only the active preview points reach the renderer");
+    return source.ctx.calls.filter(([name]) => name === "drawImage").length;
+  };
+  assert.equal(run(0), 1, "empty artwork composites one cached committed canvas");
+  assert.equal(run(32), 1, "committed history count does not add preview compositing blits");
+}));
+
+test("a playback-like view-bounds change is distinct from the fixed-view Fiber preview invariant", () => withSource(() => {
+  const source = new DrawingSource({ width: 512, height: 512 });
+  for (let index = 0; index < 8; index += 1) source.commitDrawable(fiberDrawable(index * 14));
+  let committedCompositions = 0;
+  const composeCommittedAtlas = source.composeCommittedAtlas.bind(source);
+  source.composeCommittedAtlas = (...args) => { committedCompositions += 1; return composeCommittedAtlas(...args); };
+  assert.equal(source.prepareView({ worldBounds: { left: -128, top: -128, right: 640, bottom: 640 }, pixelWidth: 512, pixelHeight: 512 }), true);
+  assert.ok(committedCompositions > 0, "a changed renderer view is allowed to regenerate the committed atlas");
 }));
 
 test("committed animation composes only the dynamic history tail", () => withSource(() => {

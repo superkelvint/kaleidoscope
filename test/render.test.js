@@ -10,8 +10,10 @@ function fakeGl() {
   gl.textureUploads = 0;
   gl.textureSubUploads = 0;
   gl.drawCalls = 0;
+  gl.boundTextures = [];
   gl.texImage2D = () => { gl.textureUploads += 1; };
   gl.texSubImage2D = () => { gl.textureSubUploads += 1; };
+  gl.bindTexture = (_target, texture) => { gl.boundTextures.push(texture); };
   gl.drawArrays = () => { gl.drawCalls += 1; };
   gl.getShaderParameter = () => true; gl.getProgramParameter = () => true; gl.getShaderInfoLog = () => ""; gl.getProgramInfoLog = () => ""; gl.getUniformLocation = () => ({}); gl.getAttribLocation = () => 0;
   return gl;
@@ -99,6 +101,52 @@ test("updates same-sized source revisions with texSubImage2D", () => {
   assert.equal(renderer.syncSourceTexture(), true);
   assert.equal(renderer.gl.textureUploads, images);
   assert.equal(renderer.gl.textureSubUploads, 1);
+});
+
+test("GPU source frames are bound directly without CPU texture uploads", () => {
+  const renderer = createRenderer();
+  const texture = { name: "pixi-render-texture" };
+  let frame = { kind: "gpu", texture, width: 2048, height: 2048, revision: 123, world: { wrap: "clamp" } };
+  const uploads = renderer.gl.textureUploads, subUploads = renderer.gl.textureSubUploads;
+  renderer.setSource({ getFrame: () => frame });
+  assert.equal(renderer.gl.textureUploads, uploads);
+  assert.equal(renderer.gl.textureSubUploads, subUploads);
+  assert.equal(renderer.activeSourceTexture, texture);
+  renderer.resizeTargets(1, 1);
+  renderer.drawStep(0);
+  assert.ok(renderer.gl.boundTextures.includes(texture), "drawStep samples the supplied GPU texture");
+  assert.deepEqual(renderer.getSourceDiagnostics(), { textureUploads: 0, textureSubUploads: 0, gpuTextureUses: 1, readPixelsCalls: 0 });
+  frame = { ...frame, revision: 124 };
+  renderer.syncSourceTexture();
+  assert.equal(renderer.getSourceDiagnostics().gpuTextureUses, 2);
+  // Target allocation performed by resizeTargets is unrelated to source data.
+  assert.equal(renderer.getSourceDiagnostics().textureUploads, 0);
+  assert.equal(renderer.getSourceDiagnostics().textureSubUploads, 0);
+});
+
+test("switching bitmap to GPU drawing and back restores the correct source texture", () => {
+  const renderer = createRenderer();
+  const bitmap = { getFrame: () => ({ kind: "bitmap", pixels: { name: "bitmap" }, width: 20, height: 10, revision: 1 }) };
+  const gpuTexture = { name: "drawing" };
+  const drawing = { getFrame: () => ({ kind: "gpu", texture: gpuTexture, width: 20, height: 10, revision: 4 }) };
+  renderer.setSource(bitmap);
+  renderer.setSource(drawing);
+  assert.equal(renderer.activeSourceTexture, gpuTexture);
+  renderer.setSource(bitmap);
+  assert.equal(renderer.activeSourceTexture, renderer.sourceTexture);
+  assert.equal(renderer.uploadedSource, bitmap);
+});
+
+test("GPU-backed live previews remain structurally zero-copy", () => {
+  const renderer = createRenderer(), texture = {};
+  let revision = 0;
+  renderer.setSource({ getFrame: () => ({ kind: "gpu", texture, width: 256, height: 256, revision }) });
+  for (let index = 0; index < 30; index += 1) { revision += 1; assert.equal(renderer.syncSourceTexture(), true); }
+  const diagnostics = renderer.getSourceDiagnostics();
+  assert.equal(diagnostics.textureUploads, 0);
+  assert.equal(diagnostics.textureSubUploads, 0);
+  assert.equal(diagnostics.readPixelsCalls, 0);
+  assert.equal(diagnostics.gpuTextureUses, 31);
 });
 
 test("re-uploads a source when switching back to it at the same revision", () => {
