@@ -5,7 +5,7 @@ import { prepareGuillocheFrame } from "../generators.js";
 
 function spirograph(overrides = {}) {
   return {
-    kind: "generatedStroke", generator: "spirograph", generatorVersion: 1,
+    kind: "generatedStroke", generator: "spirograph", generatorVersion: 2,
     config: { lobes: 5, penOffset: 1.2, reach: .1, rotation: 0, phase: 0, arms: 3 },
     animation: { amount: .5, speed: .15, phase: 0 },
     domain: { start: 0, end: Math.PI * 2 }, sampling: { mode: "parameter", step: .01 },
@@ -14,10 +14,10 @@ function spirograph(overrides = {}) {
 }
 function guillocheRosette(overrides = {}) {
   return {
-    kind: "generatedStroke", generator: "guillocheRosette", generatorVersion: 1,
+    kind: "generatedStroke", generator: "guillocheRosette", generatorVersion: 2,
     config: { petals: 8, secondaryFrequency: 13, primaryAmplitude: .08, secondaryAmplitude: .035, baseRadius: .2, rotation: 0, lineCount: 6, lineSpacing: .006, phaseOffset: 0 },
     animation: { amount: .5, speed: .15, targets: { phaseOffset: false, secondaryAmplitude: false, secondaryFrequency: false, rotation: false } },
-    placement: { mode: "single", spacing: .9 }, domain: { start: 0, end: Math.PI * 2 }, sampling: { mode: "parameter", step: .01 },
+    domain: { start: 0, end: Math.PI * 2 }, sampling: { mode: "parameter", step: .01 },
     style: { brush: "pen", color: "#fff", colorMode: "solid", size: 4, opacity: 1, seed: 9 }, ...overrides
   };
 }
@@ -41,33 +41,14 @@ test("static and malformed generator recipes are handled safely", () => {
   assert.deepEqual(derivePath(spirograph({ sampling: { mode: "parameter", step: 0 } }), { width: 100, height: 100 }).contours, []);
 });
 
-test("tile placement repeats one normalized Spirograph in bounded, separate contours", () => {
-  const single = spirograph({ config: { lobes: 5, penOffset: 1.2, reach: .1, rotation: 0, phase: 0, arms: 2 }, placement: { mode: "single", spacing: .9 } });
-  const tiled = { ...single, placement: { mode: "tile", spacing: .4 } };
-  const singlePath = derivePath(single, { width: 100, height: 100, time: 2 });
-  const tiledPath = derivePath(tiled, { width: 100, height: 100, time: 2 });
-  assert.equal(singlePath.contours.length, 2);
-  assert.equal(tiledPath.contours.length, 2, "tile placement reuses the two base contours");
-  assert.equal(tiledPath.instances.length, 25, "Spirograph retains the bounded 5×5 grid");
-  assert.deepEqual(tiledPath.contours[0].points, singlePath.contours[0].points, "the base contour is unchanged");
-  const center = tiledPath.instances.find(instance => instance.x === 0 && instance.y === 0);
-  const rightNeighbor = tiledPath.instances.find(instance => instance.x === 40 && instance.y === 0);
-  assert.deepEqual(center, { x: 0, y: 0 });
-  assert.deepEqual(rightNeighbor, { x: 40, y: 0 });
-  assert.equal(isDrawable({ ...tiled, placement: { mode: "tile", spacing: .01 } }), false);
-});
-
-test("guilloche rosette creates a radial engraved bundle and tiles it independently", () => {
-  const single = guillocheRosette();
-  const tiled = { ...single, placement: { mode: "tile", spacing: .9 } };
-  const singlePath = derivePath(single, { width: 100, height: 100, time: 0 });
-  const tiledPath = derivePath(tiled, { width: 100, height: 100, time: 0 });
-  assert.equal(singlePath.contours.length, 6);
-  assert.ok(singlePath.contours.every(contour => contour.closed && contour.points.length > 600));
-  assert.notDeepEqual(singlePath.contours[0].points, singlePath.contours[1].points);
-  assert.equal(tiledPath.contours.length, 6);
-  assert.ok(tiledPath.instances.length < 25, "off-canvas rosette copies are culled");
-  assert.deepEqual(tiledPath.contours[0].points, singlePath.contours[0].points);
+test("generated recipes derive one canonical contour family without placement", () => {
+  for (const drawable of [spirograph(), guillocheRosette()]) {
+    const path = derivePath(drawable, { width: 100, height: 100, time: 0 });
+    assert.ok(path.contours.length > 0);
+    assert.deepEqual(path.instances, [{ x: 0, y: 0 }]);
+    assert.equal("placement" in drawable, false);
+    assert.equal(isDrawable({ ...drawable, placement: { mode: "tile", spacing: .4 } }), false);
+  }
 });
 
 test("guilloche rosette animation is checkbox-controlled, deterministic, and validated", () => {

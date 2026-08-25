@@ -37,14 +37,17 @@ function boundsFor(drawable, width, height, time) {
   const pad = brushFootprint(drawable.style) + ANTIALIAS_PADDING;
   return { left: Math.floor(left - pad), top: Math.floor(top - pad), right: Math.ceil(right + pad), bottom: Math.ceil(bottom + pad) };
 }
-function contourBounds(contours, style) {
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const contour of contours) for (const point of contour.points || []) {
-    minX = Math.min(minX, point.x); minY = Math.min(minY, point.y); maxX = Math.max(maxX, point.x); maxY = Math.max(maxY, point.y);
+function migrateDrawable(drawable) {
+  // Version 1 was the placement-bearing generated-stroke schema. Only those
+  // records have an unambiguous migration; other unsupported versions remain
+  // invalid instead of being silently reinterpreted.
+  if (drawable?.kind === "generatedStroke" && drawable.generatorVersion === 1 && drawable.placement !== undefined) {
+    const migrated = structuredClone(drawable);
+    delete migrated.placement;
+    migrated.generatorVersion = 2;
+    return migrated;
   }
-  if (!Number.isFinite(minX)) return null;
-  const pad = brushFootprint(style) + ANTIALIAS_PADDING;
-  return { left: Math.floor(minX - pad), top: Math.floor(minY - pad), width: Math.ceil(maxX + pad) - Math.floor(minX - pad), height: Math.ceil(maxY + pad) - Math.floor(minY - pad) };
+  return drawable;
 }
 
 /** A sparse, unbounded Canvas2D drawing world. Tile/atlas pixels are caches. */
@@ -64,7 +67,7 @@ export class DrawingSource {
     this.requestedWorldBounds = null; this.requestedPixelSize = null; this.atlasRecenterCount = 0;
     this.tiles = new Map(); this.history = []; this.historyIndex = 0; this.preview = null;
     this.backgroundColor = "#000000"; this.time = 0; this.revision = 0; this.onFrameChange = onFrameChange;
-    this.pendingTextureReplays = new Set(); this.motifCanvas = null; this.motifCtx = null;
+    this.pendingTextureReplays = new Set();
     // Bounds are derived cache metadata, never durable drawable state. They
     // let a newly exposed sparse tile skip expensive off-tile brush replay.
     this.staticDrawableBounds = new WeakMap();
@@ -97,7 +100,9 @@ export class DrawingSource {
   restoreContentState(state) {
     if (!state || typeof state !== "object") return false;
     if (typeof state.backgroundColor === "string" && state.backgroundColor.trim()) this.backgroundColor = state.backgroundColor;
-    this.history = Array.isArray(state.history) ? structuredClone(state.history.filter(op => op?.type === "clear" || (op?.type === "drawable" && this.isDrawable(op.drawable)))) : [];
+    this.history = Array.isArray(state.history) ? structuredClone(state.history
+      .map(op => op?.type === "drawable" ? { ...op, drawable: migrateDrawable(op.drawable) } : op)
+      .filter(op => op?.type === "clear" || (op?.type === "drawable" && this.isDrawable(op.drawable)))) : [];
     this.historyIndex = Math.min(this.history.length, Math.max(0, Math.floor(Number.isFinite(Number(state.historyIndex)) ? Number(state.historyIndex) : this.history.length)));
     this.preview = null; this.tiles.clear(); this.rebuildBase(); this.invalidateCommittedView(); this.rerender(); return true;
   }
@@ -138,13 +143,11 @@ export class DrawingSource {
   rebuildBase() { this.tiles.clear(); this.staticPrefixEnd = this.history.slice(0, this.historyIndex).findIndex(op => drawableDependsOnTime(op.drawable)); if (this.staticPrefixEnd < 0) this.staticPrefixEnd = this.historyIndex; }
   invalidateCommittedView() { this.committedDirty = true; }
   appendStaticOperationToCachedTiles(operation) {
-    const bounds = this.boundsForOperation(operation);
-    if (!bounds) return;
-    for (let y = floorTile(bounds.top); y <= floorTile(bounds.bottom); y += 1) for (let x = floorTile(bounds.left); x <= floorTile(bounds.right); x += 1) {
-      const tile = this.tiles.get(tileKey(x, y));
-      if (!tile) continue;
-      count("Drawing cached tile append", () => this.perfMetadata({ tile: { x, y }, historyIndex: this.historyIndex - 1 }));
-      this.paintCachedOperation(operation, tile.ctx, { x: x * TILE_SIZE, y: y * TILE_SIZE, width: TILE_SIZE, height: TILE_SIZE });
+    for (const tile of this.tiles.values()) {
+      const worldTile = { x: tile.x * TILE_SIZE, y: tile.y * TILE_SIZE, width: TILE_SIZE, height: TILE_SIZE };
+      if (!this.operationIntersectsTile(operation, worldTile)) continue;
+      count("Drawing cached tile append", () => this.perfMetadata({ tile: { x: tile.x, y: tile.y }, historyIndex: this.historyIndex - 1 }));
+      this.paintCachedOperation(operation, tile.ctx, worldTile);
     }
   }
   appendStaticOperationToCommittedView(operation) {
@@ -156,11 +159,7 @@ export class DrawingSource {
     return true;
   }
   invalidateOperation(drawable) {
-    const bounds = boundsFor(drawable, this.width, this.height, this.time);
-    if (!bounds) { this.tiles.clear(); return; }
-    for (let y = floorTile(bounds.top); y <= floorTile(bounds.bottom); y += 1) for (let x = floorTile(bounds.left); x <= floorTile(bounds.right); x += 1) {
-      const key = tileKey(x, y); if (this.tiles.has(key)) this.rebuildTile(x, y);
-    }
+    for (const tile of this.tiles.values()) this.rebuildTile(tile.x, tile.y);
   }
   boundsForOperation(operation) {
     const drawable = operation?.drawable;
@@ -282,19 +281,10 @@ export class DrawingSource {
     context.save();
     if (tile) { context.beginPath?.(); context.rect?.(0, 0, tile.width, tile.height); context.clip?.(); context.translate(-tile.x, -tile.y); }
     if (transform) { context.translate(transform.x * transform.sx, transform.y * transform.sy); context.scale?.(transform.sx, transform.sy); }
-    const instances = path.instances || [{ x: 0, y: 0 }];
-    if (drawable.kind === "generatedStroke" && instances.length > 1) this.paintInstancedMotif(path.contours, instances, drawable.style, context, preview);
-    else for (const instance of instances) this.replayContours(context, path.contours, drawable.style, instance, preview);
+    this.replayContours(context, path.contours, drawable.style, { x: 0, y: 0 }, preview);
     context.restore();
   }
   replayContours(context, contours, style, translation = { x: 0, y: 0 }, preview = false) { context.save(); context.translate(translation.x, translation.y); measure("Canvas brush replay", () => replayBrushContours(context, contours, preview ? { ...style, preview: true } : style), () => this.perfMetadata({ preview, contourCount: contours.length })); context.restore(); }
-  paintInstancedMotif(contours, instances, style, context, preview) {
-    const bounds = contourBounds(contours, style); if (!bounds) return;
-    this.ensureMotifCanvas(bounds.width, bounds.height); this.motifCtx.clearRect(0, 0, this.motifCanvas.width, this.motifCanvas.height);
-    measure("Generated motif rasterization", () => this.replayContours(this.motifCtx, contours, style, { x: -bounds.left, y: -bounds.top }, preview), () => this.perfMetadata({ preview, contourCount: contours.length }));
-    measure("Generated tile instance blits", () => { for (const instance of instances) { context.save(); context.globalCompositeOperation = "source-over"; if (preview) count("Drawing preview drawImage", () => this.perfMetadata()); context.drawImage(this.motifCanvas, bounds.left + instance.x, bounds.top + instance.y); context.restore(); } }, () => this.perfMetadata({ preview, instanceCount: instances.length }));
-  }
-  ensureMotifCanvas(width, height) { if (!this.motifCanvas) { this.motifCanvas = createPaintCanvas(width, height); this.motifCtx = this.motifCanvas.getContext("2d"); return; } if (this.motifCanvas.width < width) this.motifCanvas.width = width; if (this.motifCanvas.height < height) this.motifCanvas.height = height; }
   requestTextureReplay(textureId) { if (this.pendingTextureReplays.has(textureId)) return; this.pendingTextureReplays.add(textureId); brushTextureCatalog.ensure(textureId).then(texture => { if (texture) { this.tiles.clear(); this.invalidateCommittedView(); this.rerender(); } }).finally(() => this.pendingTextureReplays.delete(textureId)); }
 }
 

@@ -100,7 +100,7 @@ export function effectivePenOffset(config, animation, time) {
 export const GENERATORS = {
   spirograph: {
     id: "spirograph",
-    version: 1,
+    version: 2,
     // Keep the first preview inside the canonical source region sampled by the
     // default wallpaper/motif. Larger reaches remain available in the UI.
     defaults: { lobes: 5, penOffset: 1.2, reach: .1, rotation: 0, phase: 0, arms: 1 },
@@ -115,7 +115,7 @@ export const GENERATORS = {
   },
   guillocheRosette: {
     id: "guillocheRosette",
-    version: 1,
+    version: 2,
     defaults: { petals: 8, secondaryFrequency: 13, primaryAmplitude: .08, secondaryAmplitude: .035, baseRadius: .2, rotation: 0, lineCount: 18, lineSpacing: .006, phaseOffset: 0, roundness: 1, angularModulation: 0, angularFrequency: 3 },
     sample(config, t, animation, time, lineOffset = 0) {
       const frame = prepareGuillocheFrame(config, animation, time);

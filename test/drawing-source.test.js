@@ -2,7 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { DrawingSource } from "../drawing-source.js";
 import { derivePath } from "../drawable-path.js";
-import { brushTextureCatalog } from "../brush-textures.js";
 
 class FakeContext2D {
   constructor() { this.calls = []; }
@@ -22,8 +21,8 @@ const fiberDrawable = (offset = 0) => ({
   kind: "pathStroke", points: [{ x: 20, y: 50 + offset }, { x: 220, y: 50 + offset }],
   style: { ...drawable().style, brush: "fiber", version: 2, size: 8, seed: 37, fibers: .5, gravity: 42, branching: 13, curl: 12, spread: .5, wispiness: .5, assistLevel: .55 }
 });
-const generatedDrawable = () => ({ kind: "generatedStroke", generator: "spirograph", generatorVersion: 1, config: { lobes: 5, penOffset: 1.2, reach: .1, rotation: 0, phase: 0, arms: 1 }, animation: { amount: .5, speed: .15, phase: 0 }, domain: { start: 0, end: Math.PI * 2 }, sampling: { mode: "parameter", step: .01 }, style: drawable().style });
-const animatedRosette = () => ({ kind: "generatedStroke", generator: "guillocheRosette", generatorVersion: 1, config: { petals: 8, secondaryFrequency: 13, primaryAmplitude: .08, secondaryAmplitude: .035, baseRadius: .2, rotation: 0, lineCount: 2, lineSpacing: .006, phaseOffset: 0 }, animation: { amount: .5, speed: .15, targets: { phaseOffset: true, secondaryAmplitude: false, secondaryFrequency: false, rotation: false } }, domain: { start: 0, end: Math.PI * 2 }, sampling: { mode: "parameter", step: .01 }, style: drawable().style });
+const generatedDrawable = () => ({ kind: "generatedStroke", generator: "spirograph", generatorVersion: 2, config: { lobes: 5, penOffset: 1.2, reach: .1, rotation: 0, phase: 0, arms: 1 }, animation: { amount: .5, speed: .15, phase: 0 }, domain: { start: 0, end: Math.PI * 2 }, sampling: { mode: "parameter", step: .01 }, style: drawable().style });
+const animatedRosette = () => ({ kind: "generatedStroke", generator: "guillocheRosette", generatorVersion: 2, config: { petals: 8, secondaryFrequency: 13, primaryAmplitude: .08, secondaryAmplitude: .035, baseRadius: .2, rotation: 0, lineCount: 2, lineSpacing: .006, phaseOffset: 0 }, animation: { amount: .5, speed: .15, targets: { phaseOffset: true, secondaryAmplitude: false, secondaryFrequency: false, rotation: false } }, domain: { start: 0, end: Math.PI * 2 }, sampling: { mode: "parameter", step: .01 }, style: drawable().style });
 
 test("commits immutable drawables, keeps previews out of history, and exposes source-only content", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
@@ -88,13 +87,13 @@ test("static append keeps uncached intersecting tiles lazy", () => withSource(()
   assert.deepEqual(rebuilt.map(operation => operation.drawable), [crossing], "the requested tile reconstructs from semantic history");
 }));
 
-test("an uncached offscreen tile does not replay historical Fiber drawables", () => withSource(() => {
+test("an uncached distant tile skips Fiber outside its actual world bounds", () => withSource(() => {
   const source = new DrawingSource({ width: 512, height: 512 });
   for (let index = 0; index < 30; index += 1) source.commitDrawable(fiberDrawable((index % 16) * 14));
   const painted = [], paint = source.paintDrawable.bind(source);
   source.paintDrawable = (next, ...args) => { if (next.style.brush === "fiber") painted.push(next); return paint(next, ...args); };
   source.tile(10, 0);
-  assert.deepEqual(painted, [], "out-of-bounds Fiber recipes are skipped while reconstructing an empty sparse tile");
+  assert.deepEqual(painted, [], "a continuous world does not replay a Fiber into unrelated distant tiles");
 }));
 
 test("a high-zoom static append preserves the prepared atlas without historical replay", () => withSource(() => {
@@ -300,41 +299,26 @@ test("replaces an applied drawable without adding a history operation", () => wi
   assert.equal(source.replaceDrawable(2, changed), false);
 }));
 
-test("tiled generated recipes preview, persist, replay, and animate as durable placement state", () => withSource(() => {
+test("content restore migrates placement-bearing generator records without repeat settings", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
-  const tiled = generatedDrawable();
-  tiled.placement = { mode: "tile", spacing: .4 };
-  source.previewDrawable(tiled);
-  assert.equal(source.preview.placement.mode, "tile");
-  assert.equal(source.commitDrawable(tiled), true);
-  source.undo(); source.redo();
+  source.commitDrawable(drawable()); source.tile(0, 0);
   const restored = new DrawingSource({ width: 100, height: 100 });
-  assert.equal(restored.restoreContentState(source.getContentState()), true);
-  assert.deepEqual(restored.history[0].drawable.placement, { mode: "tile", spacing: .4 });
-  const before = restored.revision;
-  assert.equal(restored.setTime(2), true);
-  assert.ok(restored.revision > before);
+  const legacy = generatedDrawable(); legacy.generatorVersion = 1; legacy.placement = { mode: "tile", spacing: .4 };
+  assert.equal(restored.restoreContentState({ history: [{ type: "drawable", drawable: legacy }], historyIndex: 1 }), true);
+  assert.equal(restored.history[0].drawable.generatorVersion, 2);
+  assert.equal("placement" in restored.history[0].drawable, false);
+  const unsupported = generatedDrawable(); unsupported.generatorVersion = 1;
+  assert.equal(restored.restoreContentState({ history: [{ type: "drawable", drawable: unsupported }], historyIndex: 1 }), true);
+  assert.equal(restored.history.length, 0, "unrelated unsupported generator versions are rejected");
 }));
 
-test("tiled generated paths rasterize contours once and blit every retained instance", () => withSource(() => {
-  const source = new DrawingSource({ width: 100, height: 100 });
-  const tiled = generatedDrawable();
-  tiled.placement = { mode: "tile", spacing: .4 };
-  const path = derivePath(tiled, { width: 100, height: 100 });
-  const target = new FakeContext2D();
-  source.paintDrawable(tiled, target);
-  assert.equal(source.motifCtx.calls.filter(([name]) => name === "stroke").length, path.contours.length, "base contours replay once");
-  const blits = target.calls.filter(([name]) => name === "drawImage");
-  assert.equal(blits.length, path.instances.length, "one transparent motif composite per instance");
-  assert.ok(blits.every(([, canvas]) => canvas === source.motifCanvas));
-  assert.deepEqual(target.calls.filter(([name]) => name === "globalCompositeOperation"), path.instances.map(() => ["globalCompositeOperation", "source-over"]));
-
-  const single = generatedDrawable();
-  const direct = new DrawingSource({ width: 100, height: 100 });
-  const directTarget = new FakeContext2D();
-  direct.paintDrawable(single, directTarget);
-  assert.equal(direct.motifCanvas, null, "single placement keeps direct contour replay");
-  assert.equal(directTarget.calls.filter(([name]) => name === "stroke").length, 1);
+test("canonical manual, Fiber, and generated strokes stay out of distant sparse tiles", () => withSource(() => {
+  const source = new DrawingSource({ width: 256, height: 256 });
+  source.commitDrawable(drawable()); source.commitDrawable(fiberDrawable()); source.commitDrawable(generatedDrawable()); source.commitDrawable(animatedRosette());
+  const painted = [], paint = source.paintDrawable.bind(source);
+  source.paintDrawable = (next, ...args) => { painted.push(next); return paint(next, ...args); };
+  source.tile(20, -17);
+  assert.deepEqual(painted, [], "a distant tile does not replay canonical drawables outside their world bounds");
 }));
 
 test("compound Pen batching is exact at opacity one and debug-gated below it", () => withSource(() => {
@@ -362,67 +346,4 @@ test("compound Pen batching is exact at opacity one and debug-gated below it", (
   } finally {
     globalThis.__KALEIDOSCOPE_EXPERIMENTAL_COMPOUND_PEN__ = previous;
   }
-}));
-
-test("motif bounds include every brush footprint and antialias padding", () => withSource(() => {
-  const cases = [
-    ["pen", { size: 10, taper: "sine", colorMode: "gradient" }, 5],
-    ["ribbon", { size: 10, span: 30 }, 20],
-    ["calligraphy", { size: 10, nibRatio: 3 }, 15],
-    ["spray", { size: 10, particleSize: 6, density: 2 }, 8],
-    ["texture", { size: 10, textureId: "motif-tip", spacing: 1, rotationMode: "followStroke" }, 10 * Math.SQRT2 / 2]
-  ];
-  brushTextureCatalog.loaded.set("motif-tip", { width: 10, height: 10, tints: new Map([["#fff", { width: 10, height: 10 }]]) });
-  try {
-    for (const [brush, style, footprint] of cases) {
-      const source = new DrawingSource({ width: 100, height: 100 });
-      const tiled = generatedDrawable();
-      tiled.placement = { mode: "tile", spacing: .4 };
-      Object.assign(tiled.style, style, { brush });
-      const path = derivePath(tiled, { width: 100, height: 100 });
-      const points = path.contours.flatMap(contour => contour.points);
-      const minX = Math.min(...points.map(point => point.x)), maxX = Math.max(...points.map(point => point.x));
-      const minY = Math.min(...points.map(point => point.y)), maxY = Math.max(...points.map(point => point.y));
-      const expectedWidth = Math.ceil(maxX + footprint + 2) - Math.floor(minX - footprint - 2);
-      const expectedHeight = Math.ceil(maxY + footprint + 2) - Math.floor(minY - footprint - 2);
-      source.paintDrawable(tiled, new FakeContext2D());
-      assert.equal(source.motifCanvas.width, expectedWidth, `${tiled.style.brush} width preserves its footprint`);
-      assert.equal(source.motifCanvas.height, expectedHeight, `${tiled.style.brush} height preserves its footprint`);
-    }
-  } finally {
-    brushTextureCatalog.loaded.delete("motif-tip");
-  }
-}));
-
-test("animated tiled Guilloche remains deterministic and exposes aggregate motif timings", () => withSource(() => {
-  const source = new DrawingSource({ width: 100, height: 100 });
-  const tiled = animatedRosette();
-  tiled.placement = { mode: "tile", spacing: .4 };
-  const path = derivePath(tiled, { width: 100, height: 100, time: 0 });
-  const previousFlag = globalThis.__KALEIDOSCOPE_DEBUG_PERF__;
-  const previousTimings = globalThis.__KALEIDOSCOPE_PERF_TIMINGS__;
-  globalThis.__KALEIDOSCOPE_DEBUG_PERF__ = true;
-  globalThis.__KALEIDOSCOPE_PERF_TIMINGS__ = {};
-  try {
-    const first = new FakeContext2D(), second = new FakeContext2D();
-    source.paintDrawable(tiled, first); source.paintDrawable(tiled, second);
-    assert.deepEqual(first.calls.filter(([name]) => name === "drawImage").map(call => call.slice(2)), second.calls.filter(([name]) => name === "drawImage").map(call => call.slice(2)));
-    assert.deepEqual(first.calls.filter(([name]) => name === "drawImage").map(call => call.slice(2)), path.instances.map(instance => {
-      const bounds = first.calls.filter(([name]) => name === "drawImage")[0];
-      return [bounds[2] - path.instances[0].x + instance.x, bounds[3] - path.instances[0].y + instance.y];
-    }));
-    for (const label of ["Generated motif rasterization", "Generated tile instance blits", "Canvas brush replay", "Native Pen replay", "Compound Pen path build", "Compound Pen stroke"]) {
-      const timing = globalThis.__KALEIDOSCOPE_PERF_TIMINGS__[label];
-      assert.ok(timing);
-      assert.equal(timing.samples.length, timing.count);
-      assert.ok(timing.max >= timing.p95 && timing.p95 >= timing.average);
-    }
-  } finally {
-    globalThis.__KALEIDOSCOPE_DEBUG_PERF__ = previousFlag;
-    globalThis.__KALEIDOSCOPE_PERF_TIMINGS__ = previousTimings;
-  }
-  source.commitDrawable(tiled);
-  const before = source.revision;
-  assert.equal(source.setTime(1), true);
-  assert.ok(source.revision > before);
 }));

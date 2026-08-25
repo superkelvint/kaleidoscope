@@ -99,15 +99,16 @@ motion frame remains closed at its seam. Keep the math normalized and
 deterministic for a given recipe and time.
 
 `drawable-path.js` validates durable `generatedStroke` records, bounds
-parameter sampling, converts normalized geometry to transient pixel-space
-contours, and returns separate placement instances. It is the only layer that
-knows how a `generatedStroke` executes. A durable generated stroke contains its
-generator/version, `config`, `animation`, parameter `domain`/`sampling`,
-`placement`, and immutable brush `style`. Placement is `single` or `tile`; tile
-instances must remain translations, not duplicated contour arrays.
+parameter sampling, and converts normalized geometry to one transient
+pixel-space contour family. It is the only layer that knows how a
+`generatedStroke` executes. A durable generated stroke contains its
+generator/version, `config`, `animation`, parameter `domain`/`sampling`, and
+immutable brush `style`; it has no per-generator placement state.
 
 `DrawingSource` supplies project time to generic path derivation and rerenders
-only when committed or preview content depends on time. Brushes remain
+only when committed or preview content depends on time. It is a continuous,
+unbounded drawing world: sparse tiles and prepared atlases paint each drawable
+only at its actual world coordinates. Brushes remain
 contour/path replay only: they must not contain generator-specific geometry or
 placement logic.
 
@@ -346,8 +347,8 @@ For generators and texture brushes also verify:
   generated recipe and style
 - an animated generator changes with timeline time, while static drawing does
   not cause a source rerasterization on timeline ticks
-- tiled generated strokes match the single motif and do not regress into a
-  brush replay per tile
+- distant sparse tiles and prepared atlases do not replay artwork outside its
+  actual world bounds during linear drift
 - texture selection survives async asset loading and causes a replay when its
   mask becomes available
 - Guilloché animation keeps closed contours at its frequency-transition seam

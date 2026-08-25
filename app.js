@@ -579,7 +579,6 @@ function makeSpirographDraft() {
     generatorVersion: generator.version,
     config: structuredClone(generator.defaults),
     animation: { amount: .5, speed: .15, phase: 0 },
-    placement: { mode: "single", spacing: .9 },
     domain: { start: 0, end: generator.period() },
     sampling: { mode: "parameter", step: .01 },
     style: drawingController.styleSnapshot()
@@ -592,7 +591,7 @@ function makeGuillocheRosetteDraft() {
     kind: "generatedStroke", generator: generator.id, generatorVersion: generator.version,
     config: structuredClone(generator.defaults),
     animation: { amount: .5, speed: .15, targets: { phaseOffset: false, secondaryAmplitude: false, secondaryFrequency: false, rotation: false } },
-    placement: { mode: "single", spacing: .9 }, domain: { start: 0, end: generator.period() },
+    domain: { start: 0, end: generator.period() },
     sampling: { mode: "parameter", step: .01 }, style: drawingController.styleSnapshot()
   };
 }
@@ -621,7 +620,6 @@ function syncGeneratorControls() {
   $("drawingGenerator").value = drawable?.generator || "none";
   $("spirographControls").hidden = !drawable || drawable.generator !== "spirograph";
   $("guillocheRosetteControls").hidden = !drawable || drawable.generator !== "guillocheRosette";
-  $("spirographTileSpacingControl").hidden = !drawable || drawable.placement?.mode !== "tile";
   const latestIndex = latestGeneratedIndex();
   $("editLatestGenerator").hidden = Boolean(drawable) || latestIndex === null;
   $("editLatestGenerator").textContent = `Edit latest ${latestIndex === null ? "generator" : drawingSource.history[latestIndex].drawable.generator === "guillocheRosette" ? "Guilloché Rosette" : "Spirograph"}`;
@@ -644,10 +642,6 @@ function syncGeneratorControls() {
     $("spirograph" + name).value = String(value);
     $("spirograph" + name + "Out").value = format(value);
   }
-  const placement = drawable.placement || { mode: "single", spacing: .9 };
-  $("spirographPlacement").value = placement.mode;
-  $("spirographTileSpacing").value = String(placement.spacing);
-  $("spirographTileSpacingOut").value = Number(placement.spacing).toFixed(2);
 }
 function previewGeneratorDraft() {
   drawingSource.setTime(renderer.getState().currentTime);
@@ -709,15 +703,6 @@ $("spirographRotation").addEventListener("input", event => {
   if (generatorDraft) { generatorDraft = drawable; previewGeneratorDraft(); }
   else if (drawingSource.replaceDrawable(generatorEditorIndex, drawable)) { syncGeneratorControls(); scheduleWorkspaceSave(); }
 });
-function updateGeneratorPlacement(patch) {
-  const drawable = structuredClone(activeGenerator());
-  if (!drawable) return;
-  drawable.placement = { ...(drawable.placement || { mode: "single", spacing: .9 }), ...patch };
-  if (generatorDraft) { generatorDraft = drawable; previewGeneratorDraft(); }
-  else if (drawingSource.replaceDrawable(generatorEditorIndex, drawable)) { syncGeneratorControls(); scheduleWorkspaceSave(); }
-}
-$("spirographPlacement").addEventListener("change", event => updateGeneratorPlacement({ mode: event.target.value }));
-$("spirographTileSpacing").addEventListener("input", event => updateGeneratorPlacement({ spacing: Number(event.target.value) }));
 $("toggleGeneratorMotion").addEventListener("click", () => {
   renderer.updateState({ playing: !renderer.getState().playing }, { preview: false });
 });
@@ -749,11 +734,6 @@ function syncGuillocheRosetteControls(drawable, editing) {
     $("guillocheRosette" + key[0].toUpperCase() + key.slice(1)).value = String(value);
     $("guillocheRosette" + key[0].toUpperCase() + key.slice(1) + "Out").value = format(value);
   }
-  const placement = drawable.placement || { mode: "single", spacing: .9 };
-  $("guillocheRosettePlacement").value = placement.mode;
-  $("guillocheRosetteTileSpacingControl").hidden = placement.mode !== "tile";
-  $("guillocheRosetteTileSpacing").value = String(placement.spacing);
-  $("guillocheRosetteTileSpacingOut").value = Number(placement.spacing).toFixed(2);
   for (const key of ["PhaseOffset", "SecondaryAmplitude", "SecondaryFrequency", "Rotation"]) $("guillocheRosetteMotion" + key).checked = drawable.animation.targets[key[0].toLowerCase() + key.slice(1)];
   $("guillocheRosetteMotion").value = String(drawable.animation.amount);
   $("guillocheRosetteMotionOut").value = Number(drawable.animation.amount).toFixed(2);
@@ -777,8 +757,6 @@ for (const key of ["phaseOffset", "secondaryAmplitude", "secondaryFrequency", "r
   const drawable = structuredClone(activeGenerator()); if (!drawable || drawable.generator !== "guillocheRosette") return;
   drawable.animation.targets[key] = event.target.checked; updateGuillocheRosette(drawable);
 });
-$("guillocheRosettePlacement").addEventListener("change", event => { const drawable = structuredClone(activeGenerator()); if (drawable?.generator === "guillocheRosette") { drawable.placement = { ...(drawable.placement || { spacing: .9 }), mode: event.target.value }; updateGuillocheRosette(drawable); } });
-$("guillocheRosetteTileSpacing").addEventListener("input", event => { const drawable = structuredClone(activeGenerator()); if (drawable?.generator === "guillocheRosette") { drawable.placement = { ...(drawable.placement || { mode: "single" }), spacing: Number(event.target.value) }; updateGuillocheRosette(drawable); } });
 $("toggleGuillocheRosetteMotion").addEventListener("click", () => renderer.updateState({ playing: !renderer.getState().playing }, { preview: false }));
 $("commitGuillocheRosette").addEventListener("click", () => { if (!generatorDraft) { resetGeneratorDraft(); return; } if (drawingSource.commitDrawable(generatorDraft)) { generatorDraft = null; generatorEditorIndex = drawingSource.historyIndex - 1; syncGeneratorControls(); refreshDrawingHistoryControls(); scheduleWorkspaceSave(); } });
 $("resetGuillocheRosette").addEventListener("click", resetGeneratorDraft);

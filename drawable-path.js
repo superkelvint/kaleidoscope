@@ -3,7 +3,6 @@ import { measure } from "./perf.js";
 
 const MAX_SAMPLES_PER_CONTOUR = 2048;
 const MIN_PARAMETER_STEP = .002;
-const TILE_PLACEMENT_LIMITS = { spacing: [.15, .9], radius: 2 };
 function validStyle(style) { return Boolean(style && typeof style === "object" && typeof style.brush === "string"); }
 function validPoint(point) { return Number.isFinite(point?.x) && Number.isFinite(point?.y) && (point.holdCount === undefined || (Number.isFinite(point.holdCount) && point.holdCount >= 0)); }
 
@@ -18,18 +17,7 @@ function validGeneratedStroke(drawable) {
   const step = drawable.sampling?.step;
   return drawable.sampling?.mode === "parameter" && Number.isFinite(start) && Number.isFinite(end) && end > start
     && end - start <= TAU * 8 && Number.isFinite(step) && step > 0 && (drawable.generator !== "spirograph" || Number(drawable.config.arms) <= 8)
-    && Boolean(placementOf(drawable));
-}
-
-function placementOf(drawable) {
-  const placement = drawable?.placement;
-  // Recipes created before placement existed preserve their original, single
-  // contour behavior exactly.
-  if (placement === undefined) return { mode: "single", spacing: .9 };
-  if (!placement || !["single", "tile"].includes(placement.mode)) return null;
-  const spacing = Number(placement.spacing);
-  if (!Number.isFinite(spacing) || spacing < TILE_PLACEMENT_LIMITS.spacing[0] || spacing > TILE_PLACEMENT_LIMITS.spacing[1]) return null;
-  return { mode: placement.mode, spacing };
+    && drawable.placement === undefined;
 }
 
 function normalizedSpirographContours(drawable, time) {
@@ -72,20 +60,6 @@ function normalizedGuillocheRosetteContours(drawable, time) {
   });
 }
 
-function instancesFor(drawable, placement) {
-  if (placement.mode !== "tile") return [{ x: 0, y: 0 }];
-  const offsets = [];
-  const radius = drawable.generator === "guillocheRosette"
-    ? drawable.config.baseRadius + Math.abs(drawable.config.primaryAmplitude) + Math.abs(drawable.config.secondaryAmplitude) * (1 + (drawable.animation.targets.secondaryAmplitude ? .65 * drawable.animation.amount : 0)) + (drawable.config.lineCount - 1) * drawable.config.lineSpacing / 2
-    : Infinity;
-  for (let y = -TILE_PLACEMENT_LIMITS.radius; y <= TILE_PLACEMENT_LIMITS.radius; y += 1) for (let x = -TILE_PLACEMENT_LIMITS.radius; x <= TILE_PLACEMENT_LIMITS.radius; x += 1) {
-    const offsetX = x * placement.spacing, offsetY = y * placement.spacing;
-    if (radius !== Infinity && (offsetX + radius < -.5 || offsetX - radius > .5 || offsetY + radius < -.5 || offsetY - radius > .5)) continue;
-    offsets.push({ x: offsetX, y: offsetY });
-  }
-  return offsets;
-}
-
 export function isDrawable(drawable) {
   if (drawable?.kind === "pathStroke") return Array.isArray(drawable.points) && validStyle(drawable.style) && drawable.points.every(validPoint);
   if (drawable?.kind === "generatedStroke") return validGeneratedStroke(drawable);
@@ -102,15 +76,13 @@ export function derivePath(drawable, { width, height, time = 0 } = {}) {
   return measure("derivePath", () => {
   if (drawable?.kind === "pathStroke") return { contours: [{ points: drawable.points, closed: false }], instances: [{ x: 0, y: 0 }] };
   if (!validGeneratedStroke(drawable) || !Number.isFinite(width) || !Number.isFinite(height)) return { contours: [] };
-  const placement = placementOf(drawable);
-  if (!placement) return { contours: [] };
-  // Geometry is pixel-space once; placement is represented as canvas-space
-  // instances so tiled paths never duplicate their point arrays.
+  // Geometry belongs to one canonical location in the continuous drawing
+  // world; generated recipes have no placement.
   const baseContours = drawable.generator === "spirograph" ? normalizedSpirographContours(drawable, time) : normalizedGuillocheRosetteContours(drawable, time);
   const contours = baseContours.map(contour => ({
     closed: contour.closed,
     points: contour.points.map(point => ({ x: (point.x + .5) * width, y: (.5 - point.y) * height }))
   }));
-  return { contours, instances: instancesFor(drawable, placement).map(offset => ({ x: offset.x * width || 0, y: -offset.y * height || 0 })) };
+  return { contours, instances: [{ x: 0, y: 0 }] };
   });
 }
