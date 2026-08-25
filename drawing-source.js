@@ -5,6 +5,8 @@ import { count, measure } from "./perf.js";
 
 const TILE_SIZE = 1024;
 const ANTIALIAS_PADDING = 2;
+const PREPARED_ATLAS_SCALE = 2;
+const PREPARED_SAFE_FRACTION = .6;
 function createPaintCanvas(width, height) {
   if (typeof OffscreenCanvas !== "undefined") return new OffscreenCanvas(width, height);
   const canvas = document.createElement("canvas"); canvas.width = width; canvas.height = height; return canvas;
@@ -57,9 +59,15 @@ export class DrawingSource {
     this.baseCanvas = createPaintCanvas(this.width, this.height); this.baseCtx = this.baseCanvas.getContext("2d");
     this.baseStaticCanvas = createPaintCanvas(this.width, this.height); this.baseStaticCtx = this.baseStaticCanvas.getContext("2d");
     this.atlasOrigin = { x: 0, y: 0 }; this.atlasExtent = { width: this.width, height: this.height };
+    // The renderer's most recent request is diagnostic state. The frame still
+    // exposes the larger prepared atlas via atlasOrigin/atlasExtent.
+    this.requestedWorldBounds = null; this.requestedPixelSize = null; this.atlasRecenterCount = 0;
     this.tiles = new Map(); this.history = []; this.historyIndex = 0; this.preview = null;
     this.backgroundColor = "#000000"; this.time = 0; this.revision = 0; this.onFrameChange = onFrameChange;
     this.pendingTextureReplays = new Set(); this.motifCanvas = null; this.motifCtx = null;
+    // Bounds are derived cache metadata, never durable drawable state. They
+    // let a newly exposed sparse tile skip expensive off-tile brush replay.
+    this.staticDrawableBounds = new WeakMap();
     // Kept as compatibility/introspection fields; static tile replay is now lazy.
     this.staticPrefixEnd = 0; this.staticCheckpoints = [];
     this.composeAtlas();
@@ -68,15 +76,7 @@ export class DrawingSource {
   getWorldScale() { return { width: this.width, height: this.height }; }
   getFrame() { return { pixels: this.canvas, width: this.canvas.width, height: this.canvas.height, revision: this.revision, world: { origin: this.atlasOrigin, extent: this.atlasExtent, scale: { width: this.width, height: this.height }, wrap: "clamp" } }; }
   getContentState() {
-    // A clear makes all earlier applied operations visually unreachable. Keep
-    // them in memory so Clear remains undoable during this session, but never
-    // serialize an expensive Fiber history that a restored workspace cannot
-    // display without undoing the clear.
-    let start = 0;
-    for (let index = this.historyIndex - 1; index >= 0; index -= 1) {
-      if (this.history[index]?.type === "clear") { start = index + 1; break; }
-    }
-    return structuredClone({ backgroundColor: this.backgroundColor, history: this.history.slice(start), historyIndex: this.historyIndex - start });
+    return structuredClone({ backgroundColor: this.backgroundColor, history: this.history, historyIndex: this.historyIndex });
   }
   isDrawable(drawable) { return isDrawable(drawable) && Boolean(BRUSHES[drawable?.style?.brush]) && (drawable.kind !== "pathStroke" || canReplayBrushPath(drawable.points, drawable.style)); }
   markFrameChanged() { this.revision += 1; this.onFrameChange(); }
@@ -86,6 +86,9 @@ export class DrawingSource {
       activePreviewPointCount: this.preview?.points?.length || 0,
       atlasBounds: { left: this.atlasOrigin.x, top: this.atlasOrigin.y, width: this.atlasExtent.width, height: this.atlasExtent.height },
       atlasPixels: { width: this.canvas.width, height: this.canvas.height },
+      requestedBounds: this.requestedWorldBounds ? { ...this.requestedWorldBounds } : null,
+      requestedPixels: this.requestedPixelSize ? { ...this.requestedPixelSize } : null,
+      atlasRecenterCount: this.atlasRecenterCount,
       committedDirty: this.committedDirty,
       ...extra
     };
@@ -105,7 +108,13 @@ export class DrawingSource {
   }
   commitDrawable(drawable) { if (!this.isDrawable(drawable)) return false; this.preview = null; this.appendOperation({ type: "drawable", drawable: structuredClone(drawable) }); return true; }
   replaceDrawable(index, drawable) { if (!Number.isInteger(index) || index < 0 || index >= this.historyIndex || !this.isDrawable(drawable) || this.history[index]?.type !== "drawable") return false; this.history[index] = { type: "drawable", drawable: structuredClone(drawable) }; this.rebuildBase(); this.invalidateCommittedView(); this.rerender(); return true; }
-  clear() { this.preview = null; this.appendOperation({ type: "clear" }); }
+  clear() {
+    // Clear is deliberately destructive. Keeping a hidden pre-clear history
+    // would retain expensive Fiber recipes without offering undo semantics.
+    this.preview = null; this.history = []; this.historyIndex = 0;
+    this.tiles.clear(); this.staticPrefixEnd = 0; this.staticCheckpoints = [];
+    this.invalidateCommittedView(); this.rerender();
+  }
   canUndo() { return this.historyIndex > 0; } canRedo() { return this.historyIndex < this.history.length; }
   undo() { if (!this.canUndo()) return false; this.historyIndex -= 1; this.rebuildBase(); this.invalidateCommittedView(); this.rerender(); return true; }
   redo() { if (!this.canRedo()) return false; this.historyIndex += 1; this.rebuildBase(); this.invalidateCommittedView(); this.rerender(); return true; }
@@ -114,22 +123,61 @@ export class DrawingSource {
   appendOperation(operation) {
     if (this.historyIndex < this.history.length) this.history.splice(this.historyIndex);
     this.history.push(operation); this.historyIndex = this.history.length;
-    // A clear invalidates every cached world tile. Other operations only rebuild
-    // cached tiles they can reach; unseen tiles are reconstructed on demand.
-    if (operation.type === "clear") this.tiles.clear(); else this.invalidateOperation(operation.drawable);
+    const timeDependent = drawableDependsOnTime(operation.drawable);
+    if (timeDependent) this.invalidateOperation(operation.drawable);
+    else this.appendStaticOperationToCachedTiles(operation);
     this.staticPrefixEnd = this.history.slice(0, this.historyIndex).findIndex(op => drawableDependsOnTime(op.drawable));
     if (this.staticPrefixEnd < 0) this.staticPrefixEnd = this.historyIndex;
     if (["fiber", "hair"].includes(operation.drawable?.style?.brush)) this.staticCheckpoints.push({ index: this.historyIndex, canvas: this.baseStaticCanvas });
-    this.invalidateCommittedView(); this.rerender();
+    if (!timeDependent && this.appendStaticOperationToCommittedView(operation)) {
+      this.rerender();
+    } else {
+      this.invalidateCommittedView(); this.rerender();
+    }
   }
   rebuildBase() { this.tiles.clear(); this.staticPrefixEnd = this.history.slice(0, this.historyIndex).findIndex(op => drawableDependsOnTime(op.drawable)); if (this.staticPrefixEnd < 0) this.staticPrefixEnd = this.historyIndex; }
   invalidateCommittedView() { this.committedDirty = true; }
+  appendStaticOperationToCachedTiles(operation) {
+    const bounds = this.boundsForOperation(operation);
+    if (!bounds) return;
+    for (let y = floorTile(bounds.top); y <= floorTile(bounds.bottom); y += 1) for (let x = floorTile(bounds.left); x <= floorTile(bounds.right); x += 1) {
+      const tile = this.tiles.get(tileKey(x, y));
+      if (!tile) continue;
+      count("Drawing cached tile append", () => this.perfMetadata({ tile: { x, y }, historyIndex: this.historyIndex - 1 }));
+      this.paintCachedOperation(operation, tile.ctx, { x: x * TILE_SIZE, y: y * TILE_SIZE, width: TILE_SIZE, height: TILE_SIZE });
+    }
+  }
+  appendStaticOperationToCommittedView(operation) {
+    const { width, height } = this.atlasExtent;
+    const sx = this.canvas.width / width, sy = this.canvas.height / height;
+    if (this.committedDirty || !(sx > 1.001 || sy > 1.001)) return false;
+    this.paintDrawable(operation.drawable, this.committedCtx, { transform: { x: -this.atlasOrigin.x, y: -this.atlasOrigin.y, sx, sy } });
+    count("Drawing magnified committed append", () => this.perfMetadata({ historyIndex: this.historyIndex - 1 }));
+    return true;
+  }
   invalidateOperation(drawable) {
     const bounds = boundsFor(drawable, this.width, this.height, this.time);
     if (!bounds) { this.tiles.clear(); return; }
     for (let y = floorTile(bounds.top); y <= floorTile(bounds.bottom); y += 1) for (let x = floorTile(bounds.left); x <= floorTile(bounds.right); x += 1) {
       const key = tileKey(x, y); if (this.tiles.has(key)) this.rebuildTile(x, y);
     }
+  }
+  boundsForOperation(operation) {
+    const drawable = operation?.drawable;
+    if (!drawable) return null;
+    if (drawableDependsOnTime(drawable)) return boundsFor(drawable, this.width, this.height, this.time);
+    let bounds = this.staticDrawableBounds.get(drawable);
+    if (!bounds) {
+      bounds = boundsFor(drawable, this.width, this.height, this.time);
+      if (bounds) this.staticDrawableBounds.set(drawable, bounds);
+    }
+    return bounds;
+  }
+  operationIntersectsTile(operation, tile) {
+    if (operation?.type === "clear") return true;
+    const bounds = this.boundsForOperation(operation);
+    if (!bounds) return false;
+    return bounds.right >= tile.x && bounds.left <= tile.x + tile.width && bounds.bottom >= tile.y && bounds.top <= tile.y + tile.height;
   }
   tile(x, y) {
     count("Drawing tile lookup", () => this.perfMetadata({ tile: { x, y }, hit: this.tiles.has(tileKey(x, y)) }));
@@ -142,7 +190,8 @@ export class DrawingSource {
     return measure("Drawing tile rebuild", () => {
       tile.ctx.clearRect(0, 0, TILE_SIZE, TILE_SIZE);
       for (let index = 0; index < this.historyIndex; index += 1) {
-        count("Drawing tile history operation replay", () => this.perfMetadata({ tile: { x, y }, historyIndex: index }));
+        if (!this.operationIntersectsTile(this.history[index], { x: x * TILE_SIZE, y: y * TILE_SIZE, width: TILE_SIZE, height: TILE_SIZE })) continue;
+        count("Drawing tile history operation replay", () => this.perfMetadata({ tile: { x, y }, historyIndex: index, brush: this.history[index]?.drawable?.style?.brush }));
         this.paintCachedOperation(this.history[index], tile.ctx, { x: x * TILE_SIZE, y: y * TILE_SIZE, width: TILE_SIZE, height: TILE_SIZE });
       }
     }, () => this.perfMetadata({ tile: { x, y }, replayedOperations: this.historyIndex }));
@@ -157,17 +206,27 @@ export class DrawingSource {
       const metadata = this.perfMetadata({ changed: false, reason: "empty-bounds" });
       count("Drawing prepare view", metadata); return measure("Drawing prepare view unchanged", () => false, metadata);
     }
-    const width = Math.max(1, Math.min(4096, Math.floor(pixelWidth || this.width)));
-    const height = Math.max(1, Math.min(4096, Math.floor(pixelHeight || this.height)));
-    const changed = left !== this.atlasOrigin.x || top !== this.atlasOrigin.y || right - left !== this.atlasExtent.width || bottom - top !== this.atlasExtent.height || width !== this.canvas.width || height !== this.canvas.height;
-    count("Drawing prepare view", () => this.perfMetadata({ changed, requestedBounds: { left, top, width: right - left, height: bottom - top }, requestedPixels: { width, height } }));
-    if (!changed) return measure("Drawing prepare view unchanged", () => false, this.perfMetadata({ changed: false }));
+    const requestedBounds = { left, top, width: right - left, height: bottom - top };
+    const requestedPixels = { width: Math.max(1, Math.floor(pixelWidth || this.width)), height: Math.max(1, Math.floor(pixelHeight || this.height)) };
+    const previousRequestedPixels = this.requestedPixelSize;
+    this.requestedWorldBounds = requestedBounds; this.requestedPixelSize = requestedPixels;
+    const safeWidth = this.atlasExtent.width * PREPARED_SAFE_FRACTION, safeHeight = this.atlasExtent.height * PREPARED_SAFE_FRACTION;
+    const safeLeft = this.atlasOrigin.x + (this.atlasExtent.width - safeWidth) / 2, safeTop = this.atlasOrigin.y + (this.atlasExtent.height - safeHeight) / 2;
+    const insideSafeRegion = left >= safeLeft && top >= safeTop && right <= safeLeft + safeWidth && bottom <= safeTop + safeHeight;
+    const atlasPixelWidth = Math.min(4096, requestedPixels.width * PREPARED_ATLAS_SCALE), atlasPixelHeight = Math.min(4096, requestedPixels.height * PREPARED_ATLAS_SCALE);
+    const outputResolutionChanged = !previousRequestedPixels || previousRequestedPixels.width !== requestedPixels.width || previousRequestedPixels.height !== requestedPixels.height;
+    const changed = outputResolutionChanged || !insideSafeRegion;
+    const reason = outputResolutionChanged ? "resolution" : insideSafeRegion ? "safe-region" : "outside-safe-region";
+    count("Drawing prepare view", () => this.perfMetadata({ changed, reason }));
+    if (!changed) return measure("Drawing prepare view unchanged", () => false, this.perfMetadata({ changed: false, reason }));
     return measure("Drawing prepare view change", () => {
-      this.atlasOrigin = { x: left, y: top }; this.atlasExtent = { width: right - left, height: bottom - top };
-      if (this.canvas.width !== width) this.canvas.width = width; if (this.canvas.height !== height) this.canvas.height = height;
-      if (this.committedCanvas.width !== width) this.committedCanvas.width = width; if (this.committedCanvas.height !== height) this.committedCanvas.height = height;
-      this.ctx = this.canvas.getContext("2d"); this.committedCtx = this.committedCanvas.getContext("2d"); this.invalidateCommittedView(); this.composeAtlas(); this.markFrameChanged(); return true;
-    }, () => this.perfMetadata({ changed: true }));
+      const atlasWidth = requestedBounds.width * PREPARED_ATLAS_SCALE, atlasHeight = requestedBounds.height * PREPARED_ATLAS_SCALE;
+      this.atlasOrigin = { x: left - (atlasWidth - requestedBounds.width) / 2, y: top - (atlasHeight - requestedBounds.height) / 2 };
+      this.atlasExtent = { width: atlasWidth, height: atlasHeight };
+      if (this.canvas.width !== atlasPixelWidth) this.canvas.width = atlasPixelWidth; if (this.canvas.height !== atlasPixelHeight) this.canvas.height = atlasPixelHeight;
+      if (this.committedCanvas.width !== atlasPixelWidth) this.committedCanvas.width = atlasPixelWidth; if (this.committedCanvas.height !== atlasPixelHeight) this.committedCanvas.height = atlasPixelHeight;
+      this.ctx = this.canvas.getContext("2d"); this.committedCtx = this.committedCanvas.getContext("2d"); this.invalidateCommittedView(); this.atlasRecenterCount += 1; this.composeAtlas(); this.markFrameChanged(); return true;
+    }, () => this.perfMetadata({ changed: true, reason }));
   }
   composeCommittedAtlas() {
     const { x, y } = this.atlasOrigin, { width, height } = this.atlasExtent;
@@ -218,6 +277,7 @@ export class DrawingSource {
   }
   paintDrawable(drawable, context = this.ctx, { preview = false, tile = null, transform = null } = {}) {
     const path = derivePath(drawable, { width: this.width, height: this.height, time: this.time }); if (!path.contours.length) return;
+    if (["fiber", "hair"].includes(drawable.style.brush)) count("Drawing Fiber rasterization", () => this.perfMetadata({ preview, tile: tile ? { x: tile.x, y: tile.y } : null }));
     if (drawable.style.brush === "texture" && !brushTextureCatalog.get(drawable.style.textureId)) { this.requestTextureReplay(drawable.style.textureId); return; }
     context.save();
     if (tile) { context.beginPath?.(); context.rect?.(0, 0, tile.width, tile.height); context.clip?.(); context.translate(-tile.x, -tile.y); }

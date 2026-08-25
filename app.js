@@ -991,5 +991,6 @@ document.addEventListener("input",scheduleWorkspaceSave,true); document.addEvent
 window.addEventListener("resize", () => { drawMirrorWedgeGuides(); renderer.requestRender(); });
 persistenceEnabled=false; const hadSavedSettings=restoreWorkspaceSettings(); populateWallpaperModes(); syncAllControls(); syncTimelineControls(); syncDrawingControls(); syncReferenceControls(); syncGeneratorControls(); refreshDrawingHistoryControls(); persistenceEnabled=true;
 setPersistenceStatus(hadSavedSettings?"Settings restored. Restoring source image...":"Local workspace save enabled."); renderer.start();
+if (globalThis.__KALEIDOSCOPE_TEST_HOOKS__ === true) globalThis.__KALEIDOSCOPE_TEST_HOOKS__ = { renderer, drawingSource, drawingController };
 setTimeout(async()=>{try{const result=await bitmapSource.restore();if(result.restored){if(sourceMode==="bitmap")setSourceMode("bitmap");$("dropHint").style.display="none";setPersistenceStatus(result.migrated?"Previous workspace restored and image migrated to IndexedDB.":"Previous workspace restored.");}}catch(error){console.warn("Unable to restore source image",error);setPersistenceStatus("Settings restored; saved source image could not be decoded.");}},0);
 saveWorkspaceSettingsNow();

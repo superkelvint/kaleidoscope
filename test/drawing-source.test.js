@@ -37,14 +37,76 @@ test("commits immutable drawables, keeps previews out of history, and exposes so
   assert.deepEqual(Object.keys(source.getContentState()).sort(), ["backgroundColor", "history", "historyIndex"]);
 }));
 
-test("a persisted clear drops unreachable Fiber history while in-session undo remains available", () => withSource(() => {
+test("clear destructively resets drawing history and persisted content", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
   const fiber = { ...drawable(), points: Array.from({ length: 512 }, (_, index) => ({ x: index, y: index % 80 })), style: { ...drawable().style, brush: "fiber", version: 2, fibers: 6, gravity: 42, branching: 13, curl: 12, spread: .5, wispiness: .5, assistLevel: .6 } };
   source.commitDrawable(fiber);
   source.clear();
-  assert.equal(source.canUndo(), true, "the live session can still undo clear");
+  assert.equal(source.canUndo(), false);
+  assert.equal(source.canRedo(), false);
   assert.deepEqual(source.getContentState().history, []);
   assert.equal(source.getContentState().historyIndex, 0);
+}));
+
+test("a static append paints only the new operation into an existing cached tile", () => withSource(() => {
+  const source = new DrawingSource({ width: 100, height: 100 });
+  const a = drawable(), b = { ...drawable(), points: [{ x: 25, y: 25 }, { x: 35, y: 35 }] }, c = { ...drawable(), points: [{ x: 40, y: 40 }, { x: 50, y: 50 }] };
+  source.commitDrawable(a); source.commitDrawable(b); source.tile(0, 0);
+  const painted = [], paint = source.paintCachedOperation.bind(source);
+  let rebuilds = 0;
+  source.paintCachedOperation = (operation, ...args) => { painted.push(operation); return paint(operation, ...args); };
+  const rebuild = source.rebuildTile.bind(source);
+  source.rebuildTile = (...args) => { rebuilds += 1; return rebuild(...args); };
+  source.commitDrawable(c);
+  assert.deepEqual(painted.map(operation => operation.drawable), [c], "only the appended drawable is rasterized");
+  assert.equal(rebuilds, 0, "ordinary append never rebuilds an existing tile");
+}));
+
+test("a Fiber append does not replay prior Fibers in a cached tile", () => withSource(() => {
+  const source = new DrawingSource({ width: 512, height: 512 });
+  for (let index = 0; index < 30; index += 1) source.commitDrawable(fiberDrawable(index * 4));
+  source.tile(0, 0);
+  const rasterized = [], paint = source.paintDrawable.bind(source);
+  source.paintDrawable = (next, ...args) => { if (next.style.brush === "fiber") rasterized.push(next); return paint(next, ...args); };
+  const next = fiberDrawable(140);
+  source.commitDrawable(next);
+  assert.deepEqual(rasterized, [next], "commit 31 rasterizes only Fiber 31");
+}));
+
+test("static append keeps uncached intersecting tiles lazy", () => withSource(() => {
+  const source = new DrawingSource({ width: 100, height: 100 });
+  const crossing = { ...drawable(), points: [{ x: 900, y: 20 }, { x: 1200, y: 20 }] };
+  source.tile(0, 0);
+  assert.equal(source.tiles.has("1,0"), false);
+  source.commitDrawable(crossing);
+  assert.equal(source.tiles.has("0,0"), true);
+  assert.equal(source.tiles.has("1,0"), false, "append does not allocate unseen tiles");
+  const rebuilt = [];
+  const paint = source.paintCachedOperation.bind(source);
+  source.paintCachedOperation = (operation, ...args) => { rebuilt.push(operation); return paint(operation, ...args); };
+  source.tile(1, 0);
+  assert.deepEqual(rebuilt.map(operation => operation.drawable), [crossing], "the requested tile reconstructs from semantic history");
+}));
+
+test("an uncached offscreen tile does not replay historical Fiber drawables", () => withSource(() => {
+  const source = new DrawingSource({ width: 512, height: 512 });
+  for (let index = 0; index < 30; index += 1) source.commitDrawable(fiberDrawable((index % 16) * 14));
+  const painted = [], paint = source.paintDrawable.bind(source);
+  source.paintDrawable = (next, ...args) => { if (next.style.brush === "fiber") painted.push(next); return paint(next, ...args); };
+  source.tile(10, 0);
+  assert.deepEqual(painted, [], "out-of-bounds Fiber recipes are skipped while reconstructing an empty sparse tile");
+}));
+
+test("a high-zoom static append preserves the prepared atlas without historical replay", () => withSource(() => {
+  const source = new DrawingSource({ width: 100, height: 100 });
+  const a = fiberDrawable(), b = fiberDrawable(20);
+  source.commitDrawable(a);
+  source.prepareView({ worldBounds: { left: 0, top: 0, right: 50, bottom: 50 }, pixelWidth: 200, pixelHeight: 200 });
+  const painted = [], paint = source.paintDrawable.bind(source);
+  source.paintDrawable = (next, ...args) => { painted.push(next); return paint(next, ...args); };
+  source.commitDrawable(b);
+  assert.ok(painted.length >= 1 && painted.every(next => JSON.stringify(next.points) === JSON.stringify(b.points)), "only the new drawable reaches cached and magnified paint paths");
+  assert.equal(source.committedDirty, false);
 }));
 
 test("a magnified atlas replays committed paths at view resolution instead of enlarging tile pixels", () => withSource(() => {
@@ -56,9 +118,42 @@ test("a magnified atlas replays committed paths at view resolution instead of en
   assert.equal(source.committedCtx.calls.some(([name]) => name === "drawImage"), false, "the low-resolution tile is not enlarged");
 }));
 
-test("linear undo/redo, branch, clear, and content restore replay drawable operations", () => withSource(() => {
+test("prepared atlas hysteresis avoids composition during linear drift, then recenters once", () => withSource(() => {
+  const source = new DrawingSource({ width: 512, height: 512 });
+  const request = left => ({ worldBounds: { left, top: 0, right: left + 512, bottom: 512 }, pixelWidth: 512, pixelHeight: 512 });
+  assert.equal(source.prepareView(request(0)), true, "the first view creates a padded atlas");
+  const revision = source.revision, origin = { ...source.atlasOrigin }, extent = { ...source.atlasExtent };
+  let committedCompositions = 0, tileRebuilds = 0;
+  const composeCommittedAtlas = source.composeCommittedAtlas.bind(source), rebuildTile = source.rebuildTile.bind(source);
+  source.composeCommittedAtlas = (...args) => { committedCompositions += 1; return composeCommittedAtlas(...args); };
+  source.rebuildTile = (...args) => { tileRebuilds += 1; return rebuildTile(...args); };
+  for (let index = 1; index <= 300; index += 1) assert.equal(source.prepareView(request(index / 10)), false, "a request inside the central safe region retains the prepared atlas");
+  assert.equal(source.revision, revision);
+  assert.deepEqual(source.atlasOrigin, origin);
+  assert.deepEqual(source.atlasExtent, extent);
+  assert.equal(committedCompositions, 0);
+  assert.equal(tileRebuilds, 0);
+  assert.equal(source.prepareView(request(60)), true, "leaving the safe region recenters the atlas");
+  assert.equal(source.revision, revision + 1);
+  assert.deepEqual(source.atlasExtent, { width: 1024, height: 1024 });
+  assert.deepEqual(source.atlasOrigin, { x: -196, y: -256 }, "the prepared atlas is centered around the requested view");
+  assert.equal(committedCompositions, 1);
+  assert.equal(source.prepareView(request(60)), false, "the same request is served from the new safe region");
+}));
+
+test("prepared atlas rebuilds when requested resolution changes after reaching the pixel cap", () => withSource(() => {
+  const source = new DrawingSource({ width: 512, height: 512 });
+  const bounds = { left: 0, top: 0, right: 512, bottom: 512 };
+  assert.equal(source.prepareView({ worldBounds: bounds, pixelWidth: 3000, pixelHeight: 3000 }), true);
+  const revision = source.revision;
+  assert.equal(source.canvas.width, 4096, "the prepared canvas is capped independently per axis");
+  assert.equal(source.prepareView({ worldBounds: bounds, pixelWidth: 3001, pixelHeight: 3000 }), true, "a renderer-resolution change still refreshes the atlas at the cap");
+  assert.equal(source.revision, revision + 1);
+}));
+
+test("linear undo/redo, branch, and content restore retain drawable operations", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
-  source.commitDrawable(drawable()); source.clear();
+  source.commitDrawable(drawable()); source.commitDrawable({ ...drawable(), points: [{ x: 30, y: 30 }, { x: 40, y: 40 }] });
   assert.equal(source.canUndo(), true);
   source.undo(); assert.equal(source.canRedo(), true);
   source.commitDrawable(drawable()); assert.equal(source.canRedo(), false);
@@ -122,6 +217,7 @@ test("a fixed-view live Fiber preview never replays committed artwork", () => wi
   const run = committedCount => {
     const source = new DrawingSource({ width: 512, height: 512 });
     for (let index = 0; index < committedCount; index += 1) source.commitDrawable(fiberDrawable((index % 20) * 12));
+    source.prepareView({ worldBounds: { left: 0, top: 0, right: 512, bottom: 512 }, pixelWidth: 512, pixelHeight: 512 });
     assert.equal(source.prepareView({ worldBounds: { left: 0, top: 0, right: 512, bottom: 512 }, pixelWidth: 512, pixelHeight: 512 }), false, "the paused renderer view is unchanged");
     source.ctx.calls.length = 0;
     let committedCompositions = 0, tileRebuilds = 0, cachedReplays = 0;
@@ -172,15 +268,14 @@ test("committed animation composes only the dynamic history tail", () => withSou
   assert.equal(source.baseStaticCtx.calls.length, staticCacheCallCount);
 }));
 
-test("history mutations move the static-prefix boundary around animation and clears", () => withSource(() => {
+test("history mutations move the static-prefix boundary around animation", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
   source.commitDrawable(drawable());
   const animated = animatedRosette();
   source.commitDrawable(animated);
-  source.clear();
   source.commitDrawable(drawable());
-  assert.equal(source.staticPrefixEnd, 1);
-  source.undo(); source.undo();
+  assert.equal(source.staticPrefixEnd, 1, "the first animated operation starts the dynamic tail");
+  source.undo();
   assert.equal(source.staticPrefixEnd, 1, "undo keeps the first animated operation in the tail");
   source.undo();
   assert.equal(source.staticPrefixEnd, 1, "undoing the animated operation restores an all-static prefix");
