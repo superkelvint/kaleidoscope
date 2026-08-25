@@ -27,13 +27,14 @@ const animatedRosette = () => ({ kind: "generatedStroke", generator: "guillocheR
 test("commits immutable drawables, keeps previews out of history, and exposes source-only content", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
   source.previewDrawable(drawable());
-  assert.equal(source.history.length, 0);
+  assert.equal(source.getHistoryState().appliedCount, 0);
   assert.ok(source.preview);
-  assert.equal(source.commitDrawable(drawable()), true);
-  assert.equal(source.history.length, 1);
-  assert.equal(source.history[0].type, "drawable");
+  const id = source.commitDrawable(drawable());
+  assert.equal(typeof id, "string");
+  assert.equal(source.getHistoryState().appliedCount, 1);
+  assert.deepEqual(source.getDrawable(id), drawable());
   assert.equal(source.preview, null);
-  assert.deepEqual(Object.keys(source.getContentState()).sort(), ["backgroundColor", "history", "historyIndex"]);
+  assert.deepEqual(Object.keys(source.getContentState()).sort(), ["backgroundColor", "cursor", "operations", "version"]);
 }));
 
 test("clear destructively resets drawing history and persisted content", () => withSource(() => {
@@ -43,8 +44,8 @@ test("clear destructively resets drawing history and persisted content", () => w
   source.clear();
   assert.equal(source.canUndo(), false);
   assert.equal(source.canRedo(), false);
-  assert.deepEqual(source.getContentState().history, []);
-  assert.equal(source.getContentState().historyIndex, 0);
+  assert.deepEqual(source.getContentState().operations, []);
+  assert.equal(source.getContentState().cursor, 0);
 }));
 
 test("a static append paints only the new operation into an existing cached tile", () => withSource(() => {
@@ -163,7 +164,7 @@ test("linear undo/redo, branch, and content restore retain drawable operations",
   assert.deepEqual(derivePath(drawable()).contours[0].points, drawable().points);
 }));
 
-test("undo resumes from a Fiber raster checkpoint instead of replaying the Fiber", () => withSource(() => {
+test("undo rebuilds derived raster state from the document ChangeSet", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
   const fiber = () => ({
     kind: "pathStroke",
@@ -179,13 +180,13 @@ test("undo resumes from a Fiber raster checkpoint instead of replaying the Fiber
   const paintOperation = source.paintOperation.bind(source);
   source.paintOperation = (...args) => { replays += 1; return paintOperation(...args); };
   source.undo();
-  assert.equal(replays, 0, "the cached raster already contains the remaining Fiber stroke");
+  assert.ok(replays > 0, "cursor changes rebuild derived state from durable truth");
 }));
 
 test("content restore rejects drawables with non-finite source coordinates", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
-  source.restoreContentState({ history: [{ type: "drawable", drawable: { ...drawable(), points: [{ x: NaN, y: 1 }] } }], historyIndex: 1 });
-  assert.equal(source.history.length, 0);
+  assert.equal(source.restoreContentState({ version: 1, backgroundColor: "#000", operations: [{ id: "bad", drawable: { ...drawable(), points: [{ x: NaN, y: 1 }] } }], cursor: 1 }), false);
+  assert.equal(source.getHistoryState().appliedCount, 0);
 }));
 
 test("time only rerasterizes content with animated drawables", () => withSource(() => {
@@ -253,7 +254,7 @@ test("committed animation composes only the dynamic history tail", () => withSou
   source.commitDrawable(drawable());
   source.commitDrawable({ ...drawable(), points: [{ x: 30, y: 30 }, { x: 40, y: 40 }] });
   const animated = animatedRosette();
-  source.commitDrawable(animated);
+  const animatedId = source.commitDrawable(animated);
   source.commitDrawable({ ...drawable(), points: [{ x: 60, y: 60 }, { x: 70, y: 70 }] });
   assert.equal(source.staticPrefixEnd, 2, "only the leading static operations are baked");
   const staticCacheCallCount = source.baseStaticCtx.calls.length;
@@ -271,7 +272,7 @@ test("history mutations move the static-prefix boundary around animation", () =>
   const source = new DrawingSource({ width: 100, height: 100 });
   source.commitDrawable(drawable());
   const animated = animatedRosette();
-  source.commitDrawable(animated);
+  const animatedId = source.commitDrawable(animated);
   source.commitDrawable(drawable());
   assert.equal(source.staticPrefixEnd, 1, "the first animated operation starts the dynamic tail");
   source.undo();
@@ -282,34 +283,30 @@ test("history mutations move the static-prefix boundary around animation", () =>
   assert.equal(source.staticPrefixEnd, 1);
   const staticReplacement = generatedDrawable();
   staticReplacement.animation.amount = 0;
-  assert.equal(source.replaceDrawable(1, staticReplacement), true);
+  assert.equal(source.replaceDrawable(animatedId, staticReplacement), true);
   assert.equal(source.staticPrefixEnd, source.historyIndex, "replacing animation with static content rebakes the prefix");
-  assert.equal(source.replaceDrawable(1, animated), true);
+  assert.equal(source.replaceDrawable(animatedId, animated), true);
   assert.equal(source.staticPrefixEnd, 1, "replacing static content with animation moves the boundary back");
 }));
 
 test("replaces an applied drawable without adding a history operation", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
-  source.commitDrawable(generatedDrawable());
+  const id = source.commitDrawable(generatedDrawable());
   const changed = generatedDrawable();
   changed.config.lobes = 7;
-  assert.equal(source.replaceDrawable(0, changed), true);
+  assert.equal(source.replaceDrawable(id, changed), true);
   assert.equal(source.history.length, 1);
-  assert.equal(source.history[0].drawable.config.lobes, 7);
-  assert.equal(source.replaceDrawable(2, changed), false);
+  assert.equal(source.getDrawable(id).config.lobes, 7);
+  assert.equal(source.replaceDrawable("missing", changed), false);
 }));
 
-test("content restore migrates placement-bearing generator records without repeat settings", () => withSource(() => {
+test("content restore rejects pre-v1 drawing content", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
   source.commitDrawable(drawable()); source.tile(0, 0);
   const restored = new DrawingSource({ width: 100, height: 100 });
-  const legacy = generatedDrawable(); legacy.generatorVersion = 1; legacy.placement = { mode: "tile", spacing: .4 };
-  assert.equal(restored.restoreContentState({ history: [{ type: "drawable", drawable: legacy }], historyIndex: 1 }), true);
-  assert.equal(restored.history[0].drawable.generatorVersion, 2);
-  assert.equal("placement" in restored.history[0].drawable, false);
-  const unsupported = generatedDrawable(); unsupported.generatorVersion = 1;
-  assert.equal(restored.restoreContentState({ history: [{ type: "drawable", drawable: unsupported }], historyIndex: 1 }), true);
-  assert.equal(restored.history.length, 0, "unrelated unsupported generator versions are rejected");
+  const legacy = generatedDrawable(); legacy.generatorVersion = 1;
+  assert.equal(restored.restoreContentState({ history: [{ type: "drawable", drawable: legacy }], historyIndex: 1 }), false);
+  assert.equal(restored.getHistoryState().appliedCount, 0);
 }));
 
 test("canonical manual, Fiber, and generated strokes stay out of distant sparse tiles", () => withSource(() => {

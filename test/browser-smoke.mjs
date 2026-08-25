@@ -38,7 +38,7 @@ try {
     gl.readPixels(left, bottom, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
     let outputEnergy = 0;
     for (let index = 0; index < pixels.length; index += 4) outputEnergy += pixels[index] + pixels[index + 1] + pixels[index + 2];
-    return { historyCount: drawingSource.historyIndex, sourceEnergy, outputEnergy };
+    return { historyCount: drawingSource.getHistoryState().appliedCount, sourceEnergy, outputEnergy };
   });
   assert.ok(drawnPen.historyCount > 0 && drawnPen.sourceEnergy > 0 && drawnPen.outputEnergy > 100,
     `a pointer-drawn pen stroke reaches the visible WebGL canvas; ${JSON.stringify(drawnPen)}`);

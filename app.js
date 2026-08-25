@@ -15,7 +15,7 @@ const referenceImage = $("referenceImage");
 const bitmapSource = new BitmapSource();
 let activeSource = bitmapSource;
 let sourceMode = "bitmap";
-const WORKSPACE_STORAGE_KEY = "kaleidoscope.workspace.v11";
+const WORKSPACE_STORAGE_KEY = "kaleidoscope.workspace.v13";
 const PLANAR_SYMMETRY_MODES = new Set(["tile", "p2", "p4", "pg", "hexagonal", "wallpaper"]);
 const TIMELINE_HALF_WINDOW = 30;
 let persistenceTimer = null;
@@ -32,7 +32,7 @@ let referenceObjectUrl = null;
 const referenceState = { visible: true, opacity: .5, editing: false, x: 0, y: 0, width: 0, height: 0 };
 let referencePointer = null;
 let generatorDraft = null;
-let generatorEditorIndex = null;
+let generatorEditorId = null;
 let fpsWindowStarted = performance.now();
 let fpsFrameCount = 0;
 
@@ -153,7 +153,7 @@ function workspaceSnapshot() {
     state: renderer.getState(),
     // Version 12 stores paths in the continuous drawing world. Earlier
     // fixed-bitmap coordinates deliberately are not replayed into it.
-    drawing: { version: 12, settings: drawingController.getState(), content: drawingSource.getContentState() },
+    drawing: { version: 1, settings: drawingController.getState(), content: drawingSource.getContentState() },
     sourceMode,
     showMirrorGuides,
     reference: { visible: referenceState.visible, opacity: referenceState.opacity },
@@ -192,7 +192,7 @@ function restoreWorkspaceSettings() {
       if (Number.isFinite(opacity)) referenceState.opacity = Math.min(1, Math.max(0, opacity));
     }
     renderer.restoreState(saved.state);
-    if (saved.drawing?.version === 12) { drawingController.restoreState(saved.drawing.settings); drawingSource.restoreContentState(saved.drawing.content); }
+    if (saved.drawing?.version === 1) { drawingController.restoreState(saved.drawing.settings); drawingSource.restoreContentState(saved.drawing.content); }
     if (saved.recordFps === 30 || saved.recordFps === 60) $("recordFps").value = String(saved.recordFps);
     if (saved.sourceMode === "drawing") {
       setSourceMode("drawing");
@@ -595,17 +595,8 @@ function makeGuillocheRosetteDraft() {
     sampling: { mode: "parameter", step: .01 }, style: drawingController.styleSnapshot()
   };
 }
-function editedGenerator() {
-  if (!Number.isInteger(generatorEditorIndex) || generatorEditorIndex < 0 || generatorEditorIndex >= drawingSource.historyIndex) return null;
-  const operation = drawingSource.history[generatorEditorIndex];
-  return operation?.type === "drawable" && operation.drawable?.kind === "generatedStroke" ? operation.drawable : null;
-}
-function latestGeneratedIndex() {
-  for (let index = drawingSource.historyIndex - 1; index >= 0; index -= 1) {
-    if (drawingSource.history[index]?.drawable?.kind === "generatedStroke") return index;
-  }
-  return null;
-}
+function editedGenerator() { return generatorEditorId ? drawingSource.getDrawable(generatorEditorId) : null; }
+function latestGenerated() { return drawingSource.findLatestDrawable(drawable => drawable?.kind === "generatedStroke"); }
 function activeGenerator() { return generatorDraft || editedGenerator(); }
 function syncGeneratorMotionButton(state = renderer.getState()) {
   const button = $("toggleGeneratorMotion");
@@ -616,13 +607,13 @@ function syncGeneratorMotionButton(state = renderer.getState()) {
 function syncGeneratorControls() {
   const drawable = activeGenerator();
   const editing = Boolean(!generatorDraft && drawable);
-  if (!drawable) generatorEditorIndex = null;
+  if (!drawable) generatorEditorId = null;
   $("drawingGenerator").value = drawable?.generator || "none";
   $("spirographControls").hidden = !drawable || drawable.generator !== "spirograph";
   $("guillocheRosetteControls").hidden = !drawable || drawable.generator !== "guillocheRosette";
-  const latestIndex = latestGeneratedIndex();
-  $("editLatestGenerator").hidden = Boolean(drawable) || latestIndex === null;
-  $("editLatestGenerator").textContent = `Edit latest ${latestIndex === null ? "generator" : drawingSource.history[latestIndex].drawable.generator === "guillocheRosette" ? "Guilloché Rosette" : "Spirograph"}`;
+  const latest = latestGenerated();
+  $("editLatestGenerator").hidden = Boolean(drawable) || latest === null;
+  $("editLatestGenerator").textContent = `Edit latest ${latest === null ? "generator" : latest.drawable.generator === "guillocheRosette" ? "Guilloché Rosette" : "Spirograph"}`;
   $("spirographEditorStatus").textContent = drawable?.generator === "spirograph" ? (generatorDraft ? "Draft preview — Commit to add it to the drawing." : editing ? "Editing committed Spirograph — changes are saved immediately." : "") : "";
   $("commitGenerator").textContent = editing ? "Done" : "Commit";
   $("resetGenerator").textContent = editing ? "Stop Editing" : "Reset";
@@ -658,7 +649,7 @@ function refreshGeneratorDraftStyle() {
 }
 function resetGeneratorDraft() {
   generatorDraft = null;
-  generatorEditorIndex = null;
+  generatorEditorId = null;
   drawingSource.previewDrawable(null);
   syncGeneratorControls();
   renderer.updateState({}, { preview: true });
@@ -666,22 +657,22 @@ function resetGeneratorDraft() {
 $("drawingGenerator").addEventListener("change", event => {
   drawingController.cancel();
   if (event.target.value === "spirograph") {
-    generatorEditorIndex = null;
+    generatorEditorId = null;
     generatorDraft = makeSpirographDraft();
     previewGeneratorDraft();
   } else if (event.target.value === "guillocheRosette") {
-    generatorEditorIndex = null;
+    generatorEditorId = null;
     generatorDraft = makeGuillocheRosetteDraft();
     previewGeneratorDraft();
   } else resetGeneratorDraft();
   drawDrawingGuides();
 });
 $("editLatestGenerator").addEventListener("click", () => {
-  const index = latestGeneratedIndex();
-  if (index === null) return;
+  const latest = latestGenerated();
+  if (!latest) return;
   drawingController.cancel();
   generatorDraft = null;
-  generatorEditorIndex = index;
+  generatorEditorId = latest.id;
   drawingSource.previewDrawable(null);
   syncGeneratorControls();
 });
@@ -694,23 +685,24 @@ for (const [id, [group, key]] of Object.entries(generatorInputFields)) $(id).add
   if (!drawable) return;
   drawable[group][key] = Number(event.target.value);
   if (generatorDraft) { generatorDraft = drawable; previewGeneratorDraft(); }
-  else if (drawingSource.replaceDrawable(generatorEditorIndex, drawable)) { syncGeneratorControls(); scheduleWorkspaceSave(); }
+  else if (drawingSource.replaceDrawable(generatorEditorId, drawable)) { syncGeneratorControls(); scheduleWorkspaceSave(); }
 });
 $("spirographRotation").addEventListener("input", event => {
   const drawable = structuredClone(activeGenerator());
   if (!drawable) return;
   drawable.config.rotation = Number(event.target.value) * Math.PI / 180;
   if (generatorDraft) { generatorDraft = drawable; previewGeneratorDraft(); }
-  else if (drawingSource.replaceDrawable(generatorEditorIndex, drawable)) { syncGeneratorControls(); scheduleWorkspaceSave(); }
+  else if (drawingSource.replaceDrawable(generatorEditorId, drawable)) { syncGeneratorControls(); scheduleWorkspaceSave(); }
 });
 $("toggleGeneratorMotion").addEventListener("click", () => {
   renderer.updateState({ playing: !renderer.getState().playing }, { preview: false });
 });
 $("commitGenerator").addEventListener("click", () => {
   if (!generatorDraft) { resetGeneratorDraft(); return; }
-  if (drawingSource.commitDrawable(generatorDraft)) {
+  const committedId = drawingSource.commitDrawable(generatorDraft);
+  if (committedId) {
     generatorDraft = null;
-    generatorEditorIndex = drawingSource.historyIndex - 1;
+    generatorEditorId = committedId;
     syncGeneratorControls();
     refreshDrawingHistoryControls();
     scheduleWorkspaceSave();
@@ -720,7 +712,7 @@ $("resetGenerator").addEventListener("click", resetGeneratorDraft);
 
 function updateGuillocheRosette(drawable) {
   if (generatorDraft) { generatorDraft = drawable; previewGeneratorDraft(); }
-  else if (drawingSource.replaceDrawable(generatorEditorIndex, drawable)) { syncGeneratorControls(); scheduleWorkspaceSave(); }
+  else if (drawingSource.replaceDrawable(generatorEditorId, drawable)) { syncGeneratorControls(); scheduleWorkspaceSave(); }
 }
 function syncGuillocheRosetteControls(drawable, editing) {
   $("guillocheRosetteEditorStatus").textContent = generatorDraft ? "Draft preview — Commit to add it to the drawing." : editing ? "Editing committed Guilloché Rosette — changes are saved immediately." : "";
@@ -758,7 +750,7 @@ for (const key of ["phaseOffset", "secondaryAmplitude", "secondaryFrequency", "r
   drawable.animation.targets[key] = event.target.checked; updateGuillocheRosette(drawable);
 });
 $("toggleGuillocheRosetteMotion").addEventListener("click", () => renderer.updateState({ playing: !renderer.getState().playing }, { preview: false }));
-$("commitGuillocheRosette").addEventListener("click", () => { if (!generatorDraft) { resetGeneratorDraft(); return; } if (drawingSource.commitDrawable(generatorDraft)) { generatorDraft = null; generatorEditorIndex = drawingSource.historyIndex - 1; syncGeneratorControls(); refreshDrawingHistoryControls(); scheduleWorkspaceSave(); } });
+$("commitGuillocheRosette").addEventListener("click", () => { if (!generatorDraft) { resetGeneratorDraft(); return; } const committedId = drawingSource.commitDrawable(generatorDraft); if (committedId) { generatorDraft = null; generatorEditorId = committedId; syncGeneratorControls(); refreshDrawingHistoryControls(); scheduleWorkspaceSave(); } });
 $("resetGuillocheRosette").addEventListener("click", resetGeneratorDraft);
 function syncDrawingBrushControls(name = drawingController.settings.brush) {
   $("drawingRibbonControls").hidden = name !== "ribbon";

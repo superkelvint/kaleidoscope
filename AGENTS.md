@@ -11,8 +11,10 @@ and task-specific plans elsewhere.
 | UI/control wiring                     | `app.js`, then the relevant HTML               |
 | Rendering, animation, feedback, bloom | `render.js`                                    |
 | Bitmap loading/persistence            | `bitmap-source.js`                             |
+| Drawing durable content               | `drawing-document.js`                          |
+| Drawing pixels/caches                 | `drawing-source.js` (`DrawingRasterizer`)      |
 | Basic drawing source                  | `drawing-source.js`, then `app.js`             |
-| Canvas2D brush rendering              | `brushes.js`                                   |
+| BrushPainter raster backend           | `brushes.js`                                   |
 | Assisted Fiber material rendering     | `fiber-brush.js`, then `brushes.js`            |
 | Brush texture assets/caching           | `brush-textures.js`, then `brushes.js`         |
 | Development performance telemetry      | `perf.js`                                      |
@@ -51,22 +53,42 @@ Exports `BitmapSource`; owns validation/decoding, current image
 pixels/dimensions, monotonic frame revision, IndexedDB persistence, and legacy
 source-image migration. It must remain WebGL-free.
 
-### `drawing-source.js` — drawing source
+### Drawing pipeline
 
-Exports `DrawingSource`; owns its offscreen Canvas2D surface, preview
-rasterization, drawable replay, linear history, and frame revision. It remains
-WebGL-free and has no pointer, renderer mapping, tool, or UI state.
+The drawing path is `controller → immutable drawable → document → ChangeSet →
+rasterizer → source frame → renderer`. Read
+[`docs/drawing-architecture.md`](docs/drawing-architecture.md) before changing
+more than one drawing boundary.
 
-Committed time-dependent content uses a static-prefix raster cache: bake only
-the operations before the first time-dependent drawable, then replay that
-drawable and every later operation in order for each time change.
+`drawing-document.js` exports `DrawingDocument`, the durable semantic truth:
+versioned operations with stable IDs, cursor, background, validation, undo/redo,
+replace-by-ID, destructive clear, and persistence. It owns no Canvas, renderer,
+time, texture, or cache state. Every mutation returns an explicit ChangeSet;
+never make the rasterizer infer changes by comparing snapshots.
 
-It also owns generated-motif raster caching for tiled generated strokes. Raster
-the motif once into a tight Canvas2D buffer and blit it at every instance; do
-not derive or brush-replay a copy of the contour for every tile. Missing texture
-assets are loaded through `brushTextureCatalog`; a successful asynchronous load
-rebuilds and rerenders the source. `onFrameChange` only requests presentation—it
-does not turn a source-pixel update into renderer state.
+`drawing-source.js` exports `DrawingSource` and `DrawingRasterizer`.
+`DrawingSource` is the renderer-facing facade: frame/view/time/preview plus
+document mutation and query APIs. UI code must use `getDrawable`,
+`findLatestDrawable`, and `getHistoryState`; it must never inspect operation
+arrays, cursors, tiles, canvases, or atlas state.
+
+`DrawingRasterizer` owns all derived raster state: prepared drawable geometry
+and bounds keyed by operation ID, time-dependent derivation/evaluation, a
+RenderIndex (operation ID → z-order/bounds/dependencies and tile → relevant
+operation IDs), sparse tiles, prepared atlas, preview, texture readiness,
+invalidation, and frame revision. It remains WebGL-free and has no pointer,
+renderer mapping, tool, persistence, or DOM UI state. `DrawingSource.setTime`
+only forwards project time; it does not derive paths.
+
+Static-prefix caching and high-zoom path replay preserve current output, but are
+implementation strategies—not drawing architecture. The durable requirements
+are z-order correctness, sharp magnification, and no static-work amplification
+on future animation ticks.
+
+Missing texture assets are loaded through `brushTextureCatalog`; when a texture
+becomes ready, invalidate the affected raster-derived state and rerender.
+`onFrameChange` only requests presentation—it does not turn a source-pixel
+update into renderer state.
 
 ### Drawing mapping and controller
 
@@ -105,8 +127,9 @@ pixel-space contour family. It is the only layer that knows how a
 generator/version, `config`, `animation`, parameter `domain`/`sampling`, and
 immutable brush `style`; it has no per-generator placement state.
 
-`DrawingSource` supplies project time to generic path derivation and rerenders
-only when committed or preview content depends on time. It is a continuous,
+`DrawingRasterizer` evaluates generic paths at project time and rerenders only
+when committed or preview content depends on time. `DrawingSource` forwards the
+time update. Drawing is a continuous,
 unbounded drawing world: sparse tiles and prepared atlases paint each drawable
 only at its actual world coordinates. Brushes remain
 contour/path replay only: they must not contain generator-specific geometry or
@@ -114,13 +137,14 @@ placement logic.
 
 ### `brushes.js` — brush rendering
 
-Exports Canvas2D-only brush implementations. Brushes receive mapped source
-coordinates and paint options; they must not depend on pointer events, source
-revisions, renderer state, WebGL, or symmetry mapping.
+Defines the `BrushPainter` raster-backend seam and today's Canvas2D painter.
+Brushes receive mapped source coordinates and paint options; they must not
+depend on pointer events, source revisions, renderer state, WebGL, or symmetry
+mapping. Do not make Canvas2D a durable brush or Fiber architectural contract.
 
 ### `fiber-brush.js` — assisted Fiber material
 
-Owns the deterministic Canvas2D Fiber recipe: bounded master-path derivation,
+Owns the deterministic Fiber material recipe: bounded master-path derivation,
 population generation, gradient sampling, lifecycles, fan-out, branches, and
 preview population reduction. It receives an immutable path/style snapshot and
 must remain independent of pointer events, drawing history, renderer state,
@@ -152,7 +176,7 @@ rendering math, GPU work, or source persistence here.
 
 It also owns generator draft/edit UI, reference-image overlay UI, brush-browser
 UI, and presentation-only FPS reporting. Generator drafts are previews; commits
-and edits use `DrawingSource` history APIs. The renderer's `onBeforeFrame`
+and edits use stable-ID `DrawingSource` document query/mutation APIs. The renderer's `onBeforeFrame`
 advances `DrawingSource` time, while its frame-change callback merely requests a
 render so drawing mutations remain incremental source updates.
 
@@ -167,7 +191,7 @@ source.getFrame()
 returning `null` or:
 
 ```
-{ pixels, width, height, revision }
+{ pixels, width, height, revision, world? }
 ```
 
 Rules:
@@ -175,6 +199,10 @@ Rules:
 - Sources own pixels, dimensions, and monotonic `revision`.
 - Increment `revision` whenever source pixels change.
 - `getFrame()` is non-destructive.
+- `world` is optional metadata for unbounded sources: `{ origin, extent, scale,
+  wrap }`, where `origin` and `extent` describe the prepared world region,
+  `scale` is the source-world scale used by mapping, and `wrap` declares source
+  sampling semantics. Bounded bitmap sources omit it.
 - `Renderer` owns GPU upload state (`uploadedSource` / `uploadedRevision`).
 - Upload again when source identity changes, even if revision numbers match.
 - Never add source-type branches to `Renderer`.
@@ -357,6 +385,19 @@ Report what was tested and anything that could not be run.
 
 For interactive bugs, tests must cover the highest practical integration
 boundary; a renderer-only test does not validate controller/UI wiring.
+
+## Drawing change protocol
+
+First classify the change: durable document, pointer/tool, screen-to-source
+mapping, path/generator, brush, or derived raster/cache. Change only its owner,
+add a failing regression at the highest practical boundary, then run the
+relevant unit tests and browser smoke.
+
+For performance-sensitive drawing changes, preserve these checks: static append
+and preview updates do not replay historical committed artwork; safe-region view
+movement does not reconstruct the committed atlas; static prepared geometry is
+not re-derived for bounds and rasterization. The target animation contract is
+that static drawables are neither derived nor rasterized on a time tick.
 
 ## Maintaining this file
 
