@@ -43,12 +43,12 @@ test("background changes consume Undo and clear discards it", () => {
   assert.equal(document.canUndo(), false, "clear also discards a background-only Undo");
 });
 
-test("document persists only schema-v2 artwork and restores without Undo", () => {
+test("document persists only schema-v3 typed operations and restores without Undo", () => {
   const document = new DrawingDocument({ createId: ids() });
   assert.equal(document.restoreContentState({ version: 1, backgroundColor: "#000", operations: [], cursor: 0 }), null);
-  assert.equal(document.restoreContentState({ version: 2, backgroundColor: "#000", operations: [], cursor: 0 }), null);
-  assert.equal(document.restoreContentState({ version: 2, backgroundColor: "#000", operations: [{ id: "same", drawable: drawable() }, { id: "same", drawable: drawable(4) }] }), null);
-  assert.equal(document.restoreContentState({ version: 2, backgroundColor: "#000", operations: [{ id: "good", drawable: drawable() }] }).type, "restore");
+  assert.equal(document.restoreContentState({ version: 2, backgroundColor: "#000", operations: [] }), null, "v2 is deliberately not migrated");
+  assert.equal(document.restoreContentState({ version: 3, backgroundColor: "#000", operations: [{ id: "same", type: "PaintOperation", points: drawable().points, style: drawable().style }, { id: "same", type: "PaintOperation", points: drawable(4).points, style: drawable(4).style }] }), null);
+  assert.equal(document.restoreContentState({ version: 3, backgroundColor: "#000", operations: [{ id: "good", type: "PaintOperation", points: drawable().points, style: drawable().style }] }).type, "restore");
   assert.deepEqual(Object.keys(document.getContentState()).sort(), ["backgroundColor", "operations", "version"]);
   assert.equal(document.canUndo(), false);
   assert.equal(document.redo, undefined);

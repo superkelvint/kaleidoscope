@@ -55,6 +55,8 @@ export class DrawingController {
       current.style.wispCenterY = sourceCenter.y;
     }
     this.current = current;
+    const drawable = { kind: "pathStroke", points: current.points.map(clone), style: clone(current.style) };
+    if (this.source.beginPaintSession) current.paintSessionId = this.source.beginPaintSession(drawable);
     this.startContinuous();
   }
   move(event) {
@@ -83,12 +85,28 @@ export class DrawingController {
     }
     else if (!event.shiftKey) this.capture(c.last, this.interactionPoint(event, c), c);
     const drawable = { kind: "pathStroke", points: c.points.map(clone), style: clone(c.style) };
-    this.source.previewDrawable(null); if (canReplayBrushPath(drawable.points, drawable.style)) this.source.commitDrawable(drawable);
+    if (c.paintSessionId) { this.source.updatePaintSession(c.paintSessionId, drawable); this.source.finishPaintSession(c.paintSessionId); }
+    else { this.source.previewDrawable(null); if (canReplayBrushPath(drawable.points, drawable.style)) this.source.commitDrawable(drawable); }
     this.stopContinuous(); this.current = null;
   }
-  cancel(event) { if (event && this.current?.pointerId !== event.pointerId && this.construction?.pointerId !== event.pointerId) return false; const hadInteraction = Boolean(this.current || this.construction); if (!hadInteraction) return false; this.cancelPreviewFrame(); this.current = null; this.construction = null; this.stopContinuous(); this.source.previewDrawable(null); return true; }
+  cancel(event) {
+    if (event && this.current?.pointerId !== event.pointerId && this.construction?.pointerId !== event.pointerId) return false;
+    const hadInteraction = Boolean(this.current || this.construction); if (!hadInteraction) return false;
+    // Immediate paint has no rollback. A cancellation completes the samples
+    // already deposited, which also releases the generator-mutation gate.
+    if (this.current?.paintSessionId) {
+      const c = this.current, drawable = { kind: "pathStroke", points: c.points.map(clone), style: clone(c.style) };
+      this.source.updatePaintSession(c.paintSessionId, drawable); this.source.finishPaintSession(c.paintSessionId);
+    }
+    this.cancelPreviewFrame(); this.current = null; this.construction = null; this.stopContinuous(); this.source.previewDrawable(null); return true;
+  }
   isFiberPreview(c) { return ["fiber", "hair", "wisp"].includes(c?.style?.brush); }
-  publishPreview(c) { if (this.current !== c) return; this.source.previewDrawable({ kind: "pathStroke", points: c.points.map(clone), style: c.style }); }
+  publishPreview(c) {
+    if (this.current !== c) return;
+    const drawable = { kind: "pathStroke", points: c.points.map(clone), style: c.style };
+    if (c.paintSessionId) this.source.updatePaintSession(c.paintSessionId, drawable);
+    else this.source.previewDrawable(drawable);
+  }
   preview(c) {
     if (!this.isFiberPreview(c)) return this.publishPreview(c);
     if (this.previewFrame !== null) return;
@@ -115,7 +133,7 @@ export class DrawingController {
   deposit() { const c = this.current, rate = CONTINUOUS[c?.style.brush]; if (!rate || !c) return; if (c.style.brush === "wisp") { const input = c.wispLatestInput || c.last, previous = c.wispPreviousInput || input, point = this.map(c.last, c); point.inputScreenVx = input.x - previous.x; point.inputScreenVy = input.y - previous.y; c.wispPreviousInput = { ...input }; c.points.push(point); this.preview(c); return; } if (!c.points.length) return; const t = performance.now(), available = c.remainder + (t - c.heldAt) * rate / 1000, n = Math.floor(available); c.heldAt = t; c.remainder = available - n; if (n) { const p = c.points.at(-1); p.holdCount = (p.holdCount || 0) + n; this.preview(c); } }
   constructDown(event, canvas) { const p = this.point(event); if (!this.construction) { const mapping = { ...this.getRendererState() }; this.construction = { pointerId: event.pointerId, canvas, mapping, tool: this.settings.tool, anchors: { start: p }, handles: {}, stage: "end", style: this.styleSnapshot() }; return; } const c = this.construction; if (!c.anchors.end) { c.anchors.end = p; c.handles = c.tool === "arc" ? { bend: p } : { startHandle: { x: (c.anchors.start.x * 2 + p.x) / 3, y: (c.anchors.start.y * 2 + p.y) / 3 }, endHandle: { x: (c.anchors.start.x + p.x * 2) / 3, y: (c.anchors.start.y + p.y * 2) / 3 } }; c.active = Object.keys(c.handles)[0]; c.dragging = false; this.updateConstruction(c); return; } c.pointerId = event.pointerId; c.dragging = true; }
   constructMove(event) { const c = this.construction; if (!c?.dragging || c.pointerId !== event.pointerId) return; c.handles[c.active] = this.point(event); this.updateConstruction(c); }
-  constructUp(event) { const c = this.construction; if (!c || c.pointerId !== event.pointerId) return; if (!c.dragging) return; c.handles[c.active] = this.point(event); const keys = Object.keys(c.handles), next = keys[keys.indexOf(c.active) + 1]; if (next) { c.active = next; c.dragging = false; c.pointerId = null; this.updateConstruction(c); return; } const drawable = this.constructDrawable(c); this.source.previewDrawable(null); if (drawable) this.source.commitDrawable(drawable); this.construction = null; }
+  constructUp(event) { const c = this.construction; if (!c || c.pointerId !== event.pointerId) return; if (!c.dragging) return; c.handles[c.active] = this.point(event); const keys = Object.keys(c.handles), next = keys[keys.indexOf(c.active) + 1]; if (next) { c.active = next; c.dragging = false; c.pointerId = null; this.updateConstruction(c); return; } const drawable = this.constructDrawable(c); this.source.previewDrawable(null); if (drawable && this.source.beginPaintSession) { const id = this.source.beginPaintSession(drawable); if (id) this.source.finishPaintSession(id); } else if (drawable) this.source.commitDrawable(drawable); this.construction = null; }
   constructDrawable(c) { const sampled = c.tool === "arc" ? sampleCircularArc(c.anchors.start, c.anchors.end, c.handles.bend, { sampleCount: 96 }) : sampleCubicBezier(c.anchors.start, c.anchors.end, c.handles.startHandle, c.handles.endHandle, { sampleCount: 96 }); return { kind: "pathStroke", points: sampled.points.map(p => this.map(p, c)), style: clone(c.style) }; }
   updateConstruction(c) { const drawable = this.constructDrawable(c); this.source.previewDrawable(drawable); c.preview = drawable; }
   getInteractionGuide() { const c = this.construction; if (!c) return null; const lines = c.anchors.end ? [{ from: c.anchors.start, to: c.anchors.end }] : []; for (const [id, p] of Object.entries(c.handles)) lines.push({ from: id === "endHandle" ? c.anchors.end : c.anchors.start, to: p }); const segments = c.anchors.end ? (c.tool === "arc" ? sampleCircularArc(c.anchors.start, c.anchors.end, c.handles.bend, { sampleCount: 48 }) : sampleCubicBezier(c.anchors.start, c.anchors.end, c.handles.startHandle, c.handles.endHandle, { sampleCount: 48 })).points : []; return { segments, lines, anchors: Object.entries(c.anchors).map(([id, point]) => ({ id, point })), handles: Object.entries(c.handles).map(([id, point]) => ({ id, point })), activeHandle: c.active, stage: c.stage }; }

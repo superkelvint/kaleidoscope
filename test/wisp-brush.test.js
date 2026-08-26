@@ -99,9 +99,7 @@ test("Wisp incremental simulation is exactly the authoritative no-tail replay", 
   const live = createWispLivePreview({ kind: "pathStroke", points: [], style });
   const painted = [];
   for (let index = 0; index < path.length; index += 1) {
-    const drawable = { kind: "pathStroke", points: path.slice(0, index + 1), style };
-    assert.equal(live.compatible(drawable), true);
-    live.advance(drawable);
+    live.advance([path[index]]);
     live.paintDelta(new BrushPainter(item => painted.push(item)));
     live.finishDelta();
     assert.equal(live.consumedSampleCount, index + 1);
@@ -110,6 +108,16 @@ test("Wisp incremental simulation is exactly the authoritative no-tail replay", 
   renderWispPath(new BrushPainter(item => replayed.push(item)), path, style, { tail: false });
   assert.deepEqual(painted, replayed, "incremental delta deposition is identical to one no-tail replay");
   assert.equal(live.activeParticleCount, state.curve.length);
+});
+
+test("Wisp live append work is bounded by the newly supplied suffix", () => {
+  const live = createWispLivePreview({ kind: "pathStroke", points: [], style });
+  const historical = Array.from({ length: 400 }, (_, index) => ({ x: index, y: index % 17 }));
+  live.advance(historical);
+  const next = { x: 401, y: 9 };
+  live.advance([next]);
+  assert.equal(live.lastAdvanceSampleCount, 1, "the hot append advances only the new sample");
+  assert.equal(live.consumedSampleCount, 401, "the retained prefix exists only for later replay");
 });
 
 test("Wisp physics is invariant when source coordinates are scaled with frozen display units", () => {

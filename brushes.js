@@ -111,6 +111,178 @@ export const BRUSHES = {
   wisp: { begin() {}, move() {}, end() {} }
 };
 
+/** Stateful immediate-mode seam. Durable replay remains path based; this is
+ * intentionally transient and preserves RNG/tangent continuity per session. */
+export function createImmediateBrushSession(style = {}) {
+  const brush = BRUSHES[style.brush];
+  if (!brush || ["fiber", "hair", "wisp"].includes(style.brush)) return null;
+  let previous = null, previousTangent = null, sampleCount = 0, travelled = 0, textureUntilStamp = 0;
+  const random = style.brush === "spray" ? createSeededRandom(style.seed) : null;
+  const maxTangentDistance = Math.max(Number(style.size) * 6 || 0, 64);
+  const spacing = Math.max(1, Number(style.size) * Math.min(1, Math.max(.05, Number(style.spacing) || .25)));
+  const livePosition = () => Math.min(1, travelled / Math.max(Number(style.size) * 24, 1));
+  const optionsFor = tangent => ({ ...style, color: colorAtPathPosition(style, livePosition()), tangent, random });
+  let delta = [];
+  const target = new BrushPainter(instruction => delta.push(instruction));
+  const paint = point => {
+    const tangent = previous ? tangentBetween(previous, point, previousTangent, maxTangentDistance) : null;
+    if (tangent) previousTangent = tangent;
+    if (style.brush === "texture") {
+      if (!previous) { textureStamp(target, point, optionsFor(tangent)); textureUntilStamp = spacing; }
+      else {
+        const dx = point.x - previous.x, dy = point.y - previous.y, distance = Math.hypot(dx, dy);
+        if (tangent && distance <= maxTangentDistance) {
+          let consumed = 0;
+          while (distance - consumed >= textureUntilStamp) {
+            consumed += textureUntilStamp; travelled += textureUntilStamp;
+            textureStamp(target, { x: previous.x + tangent.x * consumed, y: previous.y + tangent.y * consumed }, optionsFor(tangent)); textureUntilStamp = spacing;
+          }
+          const remainder = distance - consumed; travelled += remainder; textureUntilStamp -= remainder;
+        } else textureUntilStamp = spacing;
+      }
+    } else {
+      const options = optionsFor(tangent);
+      if (!previous) brush.begin(target, point, options);
+      else { travelled += Math.hypot(point.x - previous.x, point.y - previous.y); brush.move(target, previous, point, optionsFor(tangent)); }
+    }
+    previous = { x: point.x, y: point.y }; sampleCount += 1;
+  };
+  const hold = (point, count) => {
+    if (!previous || count <= 0) return;
+    const options = optionsFor(previousTangent);
+    for (let index = 0; index < count; index += 1) {
+      if (style.brush === "texture") textureStamp(target, point, options);
+      else brush.move(target, point, point, options);
+    }
+  };
+  return {
+    append: paint, hold,
+    takeDelta() { const result = delta; delta = []; return result; },
+    end() { brush.end(target, previous, style); },
+    get previous() { return previous; }
+  };
+}
+
+export function brushFootprint(style = {}) {
+  const size = Math.max(0, Number(style.size) || 0);
+  if (style.brush === "ribbon") return Math.max(0, Number(style.span) || 0) / 2 + size / 2;
+  if (style.brush === "calligraphy") return Math.max(size, size * Math.max(0, Number(style.nibRatio) || 0)) / 2;
+  if (style.brush === "spray") return size / 2 + Math.max(0, Number(style.particleSize) || 0) / 2;
+  if (style.brush === "texture") return size * Math.SQRT2 / 2;
+  if (style.brush === "fiber" || style.brush === "hair") return size * 5;
+  return size / 2;
+}
+
+export function brushTextureId(style = {}) {
+  return style.brush === "texture" && typeof style.textureId === "string" ? style.textureId : null;
+}
+
+export function needsStaticBrushCheckpoint(style = {}) {
+  return style.brush === "fiber" || style.brush === "hair";
+}
+
+function transientBounds(point, style) {
+  const pad = brushFootprint(style) + 2;
+  return { left: point.x - pad, top: point.y - pad, right: point.x + pad, bottom: point.y + pad };
+}
+
+/**
+ * Brush-neutral transient PaintSession renderer. It owns incremental brush
+ * state and emits portable paint instructions; consumers only composite those
+ * instructions into their destination material. `requiresBackdrop` describes
+ * compositing needs without exposing a brush identity.
+ */
+export function createPaintSessionRenderer(drawable) {
+  const styleFingerprint = JSON.stringify(drawable?.style || {});
+  const acceptsStyle = style => JSON.stringify(style || {}) === styleFingerprint;
+  const live = createLiveBrushPreview(drawable);
+  if (live) return {
+    acceptsStyle: style => live.acceptsStyle(style),
+    advance(next, consumed = 0) {
+      if (!live.advance(next.points.slice(consumed))) return [];
+      const bounds = live.deltaBounds();
+      if (!bounds) { live.finishDelta?.(); return []; }
+      const instructions = [];
+      live.paintDelta(new BrushPainter(instruction => instructions.push(instruction)));
+      live.finishDelta?.();
+      return instructions.length ? [{ instructions, bounds, requiresBackdrop: Boolean(live.requiresBackdrop) }] : [];
+    },
+    beginFinish: () => live.beginFinish?.(),
+    settle() {
+      if (!live.settle?.()) return [];
+      const bounds = live.deltaBounds();
+      if (!bounds) { live.finishDelta?.(); return []; }
+      const instructions = [];
+      live.paintDelta(new BrushPainter(instruction => instructions.push(instruction)));
+      live.finishDelta?.();
+      return instructions.length ? [{ instructions, bounds, requiresBackdrop: Boolean(live.requiresBackdrop) }] : [];
+    },
+    get isFinished() { return Boolean(live.isFinished); },
+    get bounds() { return live.bounds; },
+    reconstruct() {
+      const bounds = live.bounds;
+      if (!bounds) return [];
+      const instructions = [];
+      live.replay(new BrushPainter(instruction => instructions.push(instruction)));
+      return instructions.length ? [{ instructions, bounds, requiresBackdrop: Boolean(live.requiresBackdrop) }] : [];
+    },
+    dispose: () => live.dispose?.()
+  };
+
+  const immediate = createImmediateBrushSession(drawable?.style);
+  if (immediate) {
+    let samples = 0, holds = [];
+    const emit = (point, holdCount = 0) => {
+      if (holdCount) immediate.hold(point, holdCount); else immediate.append(point);
+      const instructions = immediate.takeDelta();
+      return instructions.length ? [{ instructions, bounds: transientBounds(point, drawable.style), requiresBackdrop: false }] : [];
+    };
+    return {
+      acceptsStyle,
+      advance(next) {
+        const batches = [];
+        for (let index = samples; index < next.points.length; index += 1) batches.push(...emit(next.points[index]));
+        for (let index = 0; index < next.points.length; index += 1) {
+          const count = Math.max(0, Math.floor(Number(next.points[index].holdCount) || 0));
+          if (count > (holds[index] || 0)) batches.push(...emit(next.points[index], count - (holds[index] || 0)));
+          holds[index] = count;
+        }
+        samples = next.points.length;
+        return batches;
+      },
+      beginFinish() {}, settle: () => [], get isFinished() { return true; }, get bounds() { return null; },
+      reconstruct(current = drawable) {
+        const rebuilt = createPaintSessionRenderer({ ...current, points: [] });
+        return rebuilt.advance({ ...current, points: current.points.slice(0, samples).map((point, index) => ({ ...point, holdCount: holds[index] || 0 })) });
+      },
+      dispose() { immediate.end(); holds = []; }
+    };
+  }
+  let consumed = 0;
+  const emitReplay = next => {
+    const points = next.points.slice(Math.max(0, consumed - 1));
+    consumed = next.points.length;
+    if (!points.length) return [];
+    const instructions = [];
+    replayBrushPath(new BrushPainter(instruction => instructions.push(instruction)), points, next.style);
+    if (!instructions.length) return [];
+    const pad = brushFootprint(next.style) + 2;
+    const left = Math.min(...points.map(point => point.x)) - pad, right = Math.max(...points.map(point => point.x)) + pad;
+    const top = Math.min(...points.map(point => point.y)) - pad, bottom = Math.max(...points.map(point => point.y)) + pad;
+    return [{ instructions, bounds: { left, top, right, bottom }, requiresBackdrop: false }];
+  };
+  return {
+    acceptsStyle,
+    advance: emitReplay,
+    beginFinish() {}, settle: () => [], get isFinished() { return true; }, get bounds() { return null; },
+    reconstruct(current = drawable) {
+      const rebuilt = createPaintSessionRenderer({ ...current, points: [] });
+      return rebuilt.advance({ ...current, points: current.points.slice(0, consumed) });
+    },
+    dispose() {}
+  };
+}
+
 /** Optional brush-neutral incremental preview seam. */
 export function createLiveBrushPreview(drawable) {
   return drawable?.kind === "pathStroke" && drawable?.style?.brush === "wisp" ? createWispLivePreview(drawable) : null;

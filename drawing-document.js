@@ -21,20 +21,20 @@ export class DrawingDocument {
     this.replaceAction = null;
   }
 
-  getContentState() { return clone({ version: 2, backgroundColor: this.backgroundColor, operations: this.operations }); }
+  getContentState() { return clone({ version: 3, backgroundColor: this.backgroundColor, operations: this.operations }); }
   getRenderView() { return { backgroundColor: this.backgroundColor, operations: this.operations.map(clone) }; }
   canUndo() { return Boolean(this.lastUndo); }
   get operationCount() { return this.operations.length; }
-  getDrawable(id) { return clone(this.operations.find(operation => operation.id === id)?.drawable || null); }
+  getDrawable(id) { return clone(drawableForOperation(this.operations.find(operation => operation.id === id)) || null); }
   findLatest(predicate) {
-    for (let index = this.operations.length - 1; index >= 0; index -= 1) if (predicate(this.operations[index].drawable, this.operations[index].id)) return { id: this.operations[index].id, drawable: clone(this.operations[index].drawable) };
+    for (let index = this.operations.length - 1; index >= 0; index -= 1) { const drawable = drawableForOperation(this.operations[index]); if (predicate(drawable, this.operations[index].id)) return { id: this.operations[index].id, drawable: clone(drawable) }; }
     return null;
   }
   commit(drawable) {
     if (!validDrawable(drawable)) return null;
-    const operation = { id: this.createId(), drawable: clone(drawable) };
+    const operation = operationForDrawable(this.createId(), drawable);
     this.operations.push(operation); this.lastUndo = { type: "remove", id: operation.id }; this.replaceAction = null;
-    return { type: "append", id: operation.id, drawable: clone(operation.drawable), index: this.operations.length - 1 };
+    return { type: "append", id: operation.id, operation: clone(operation), index: this.operations.length - 1 };
   }
   beginReplaceAction(id) {
     if (this.replaceAction?.id === id) return true;
@@ -48,9 +48,10 @@ export class DrawingDocument {
     const index = this.operations.findIndex(operation => operation.id === id);
     if (index < 0 || !validDrawable(drawable)) return null;
     const action = this.replaceAction?.id === id ? this.replaceAction : null;
-    const before = action ? clone(action.previousDrawable) : clone(this.operations[index].drawable);
-    this.operations[index] = { id, drawable: clone(drawable) };
-    this.lastUndo = { type: "replace", id, previousDrawable: before };
+    const before = action ? clone(action.previousDrawable) : clone(drawableForOperation(this.operations[index]));
+    this.operations[index] = operationForDrawable(id, drawable);
+    // Generator edits intentionally are retained-state changes, not commands.
+    if (this.operations[index].type !== "GeneratorOperation") this.lastUndo = { type: "replace", id, previousDrawable: before };
     return { type: "replace", id, before, after: clone(drawable), index };
   }
   undo() {
@@ -64,7 +65,7 @@ export class DrawingDocument {
     } else if (undo.type === "replace") {
       const index = this.operations.findIndex(operation => operation.id === undo.id);
       if (index < 0) return null;
-      this.operations[index] = { id: undo.id, drawable: clone(undo.previousDrawable) };
+      this.operations[index] = operationForDrawable(undo.id, undo.previousDrawable);
     } else if (undo.type === "background") this.backgroundColor = undo.previousColor;
     else return null;
     return { type: "undo", undo: clone(undo) };
@@ -80,13 +81,32 @@ export class DrawingDocument {
     return { type: "background", before, after: color };
   }
   restoreContentState(state) {
-    if (!state || state.version !== 2 || "cursor" in state || typeof state.backgroundColor !== "string" || !Array.isArray(state.operations)) return null;
+    if (!state || state.version !== 3 || "cursor" in state || typeof state.backgroundColor !== "string" || !Array.isArray(state.operations)) return null;
     const ids = new Set(), operations = [];
     for (const operation of state.operations) {
-      if (typeof operation?.id !== "string" || !operation.id || ids.has(operation.id) || !validDrawable(operation.drawable)) return null;
-      ids.add(operation.id); operations.push({ id: operation.id, drawable: clone(operation.drawable) });
+      if (!validOperation(operation) || ids.has(operation.id)) return null;
+      ids.add(operation.id); operations.push(clone(operation));
     }
     this.backgroundColor = state.backgroundColor; this.operations = operations; this.lastUndo = null; this.replaceAction = null;
     return { type: "restore" };
   }
+}
+
+function drawableForOperation(operation) {
+  if (!operation) return null;
+  if (operation.type === "PaintOperation") return { kind: "pathStroke", points: operation.points, style: operation.style };
+  if (operation.type === "GeneratorOperation") {
+    const { generator, generatorVersion, config, animation, domain, sampling, style } = operation;
+    return { kind: "generatedStroke", generator, generatorVersion, config, animation, domain, sampling, style };
+  }
+  return null;
+}
+function operationForDrawable(id, drawable) {
+  return drawable.kind === "pathStroke"
+    ? { id, type: "PaintOperation", points: clone(drawable.points), style: clone(drawable.style) }
+    : { id, type: "GeneratorOperation", generator: drawable.generator, generatorVersion: drawable.generatorVersion, config: clone(drawable.config), animation: clone(drawable.animation), domain: clone(drawable.domain), sampling: clone(drawable.sampling), style: clone(drawable.style) };
+}
+function validOperation(operation) {
+  if (typeof operation?.id !== "string" || !operation.id) return false;
+  return validDrawable(drawableForOperation(operation));
 }

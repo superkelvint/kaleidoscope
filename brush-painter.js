@@ -40,3 +40,10 @@ export class CanvasBrushPainter extends BrushPainter {
 }
 
 export function toBrushPainter(target) { return target instanceof BrushPainter ? target : new CanvasBrushPainter(target); }
+export function paintBrushInstructions(target, instructions = []) {
+  const painter = toBrushPainter(target);
+  for (const instruction of instructions) {
+    if (typeof painter.paint === "function") painter.paint(instruction);
+    else painter.emit(instruction);
+  }
+}

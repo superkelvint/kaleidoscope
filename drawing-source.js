@@ -1,5 +1,6 @@
-import { BRUSHES, canReplayBrushPath, createLiveBrushPreview, measureBrushReplay, renderBrushReplay, replayBrushContours } from "./brushes.js";
+import { BRUSHES, brushFootprint, brushTextureId, canReplayBrushPath, createLiveBrushPreview, createPaintSessionRenderer, measureBrushReplay, needsStaticBrushCheckpoint, renderBrushReplay, replayBrushContours } from "./brushes.js";
 import { brushTextureCatalog } from "./brush-textures.js";
+import { paintBrushInstructions } from "./brush-painter.js";
 import { derivePath, drawableDependsOnTime, isDrawable } from "./drawable-path.js";
 import { count, measure } from "./perf.js";
 import { DrawingDocument } from "./drawing-document.js";
@@ -14,14 +15,21 @@ function createPaintCanvas(width, height) {
 function finite(value) { return Number.isFinite(Number(value)) ? Number(value) : 0; }
 function tileKey(x, y) { return `${x},${y}`; }
 function floorTile(value) { return Math.floor(value / TILE_SIZE); }
-function brushFootprint(style = {}) {
-  const size = Math.max(0, finite(style.size));
-  if (style.brush === "ribbon") return Math.max(0, finite(style.span)) / 2 + size / 2;
-  if (style.brush === "calligraphy") return Math.max(size, size * Math.max(0, finite(style.nibRatio))) / 2;
-  if (style.brush === "spray") return size / 2 + Math.max(0, finite(style.particleSize)) / 2;
-  if (style.brush === "texture") return size * Math.SQRT2 / 2;
-  if (style.brush === "fiber" || style.brush === "hair") return size * 5;
-  return size / 2;
+// The document persists explicit operation records. The rasterizer keeps a
+// transient drawable projection so the geometry/brush seam stays unchanged.
+function drawableForOperation(operation) {
+  if (operation?.type === "PaintOperation") return { kind: "pathStroke", points: operation.points, style: operation.style };
+  if (operation?.type === "GeneratorOperation") {
+    const { generator, generatorVersion, config, animation, domain, sampling, style } = operation;
+    return { kind: "generatedStroke", generator, generatorVersion, config, animation, domain, sampling, style };
+  }
+  return operation?.drawable || null;
+}
+function rasterOperation(operation) { return { ...structuredClone(operation), drawable: drawableForOperation(operation) }; }
+function isPaintSessionDrawable(drawable) {
+  return drawable?.kind === "pathStroke" && Boolean(BRUSHES[drawable?.style?.brush])
+    && Array.isArray(drawable.points)
+    && drawable.points.every(point => Number.isFinite(point?.x) && Number.isFinite(point?.y));
 }
 function boundsForPath(path, style) {
   let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
@@ -35,6 +43,9 @@ function boundsForPath(path, style) {
   if (!Number.isFinite(left)) return null;
   const pad = brushFootprint(style) + ANTIALIAS_PADDING;
   return { left: Math.floor(left - pad), top: Math.floor(top - pad), right: Math.ceil(right + pad), bottom: Math.ceil(bottom + pad) };
+}
+function padBounds(bounds, padding = ANTIALIAS_PADDING) {
+  return bounds && { left: Math.floor(bounds.left - padding), top: Math.floor(bounds.top - padding), right: Math.ceil(bounds.right + padding), bottom: Math.ceil(bounds.bottom + padding) };
 }
 class RenderIndex {
   constructor() { this.operations = new Map(); this.tiles = new Map(); }
@@ -74,6 +85,10 @@ export class DrawingRasterizer {
     this.materialBounds = { left: 0, top: 0, width: this.width, height: this.height };
     this.materialScale = 1; this.requestedPixelDensity = 1; this.materialRebuildCount = 0;
     this.tiles = new Map(); this.operations = []; this.preview = null; this.livePreview = null;
+    // Immediate paint is deliberately separate from committed reconstruction.
+    // It is only discarded when a document-driven recomposition is necessary.
+    this.paintSessions = new Map(); this.hasImmediatePixels = false; this.immediateIsComposite = false; this.activeReconcilePending = false;
+    this.immediateCanvas = createPaintCanvas(this.width, this.height); this.immediateCtx = this.immediateCanvas.getContext("2d");
     this.backgroundColor = "#000000"; this.time = 0; this.revision = 0; this.onFrameChange = onFrameChange;
     this.pendingTextureReplays = new Set();
     // Bounds are derived cache metadata, never durable drawable state. They
@@ -82,6 +97,7 @@ export class DrawingRasterizer {
     this.renderIndex = new RenderIndex();
     // Kept as compatibility/introspection fields; static tile replay is now lazy.
     this.staticPrefixEnd = 0; this.staticCheckpoints = [];
+    this.compositionCheckpoints = [];
     this.composeMaterial();
   }
 
@@ -114,7 +130,7 @@ export class DrawingRasterizer {
   }
   advanceLivePreview(drawable) {
     let session = this.livePreview?.session;
-    if (session && !session.compatible(drawable)) this.disposeLivePreview();
+    if (session && !session.acceptsStyle(drawable.style)) this.disposeLivePreview();
     session = this.livePreview?.session;
     if (!session) {
       session = createLiveBrushPreview(drawable);
@@ -125,7 +141,8 @@ export class DrawingRasterizer {
       this.livePreview = { canvas, context, session };
     }
     const consumedBefore = session.consumedSampleCount;
-    const advanced = measure("Drawing live brush preview simulation", () => session.advance(drawable), () => this.perfMetadata({ newSampleCount: session.consumedSampleCount - consumedBefore, activeParticleCount: session.activeParticleCount }));
+    if (drawable.points.length < consumedBefore) return false;
+    const advanced = measure("Drawing live brush preview simulation", () => session.advance(drawable.points.slice(consumedBefore)), () => this.perfMetadata({ newSampleCount: session.consumedSampleCount - consumedBefore, activeParticleCount: session.activeParticleCount }));
     if (!advanced) return false;
     const bounds = session.deltaBounds();
     if (!bounds) { session.finishDelta?.(); return false; }
@@ -140,25 +157,61 @@ export class DrawingRasterizer {
     context.restore(); session.finishDelta?.();
     return true;
   }
-  rebuildFrom(view) {
+  captureCompositionCheckpoint() {
+    if (this.paintSessions.size || this.hasImmediatePixels) return;
+    if (this.operations.some(operation => drawableDependsOnTime(operation.drawable))) return;
+    this.composeCommittedMaterial();
+    const canvas = createPaintCanvas(this.committedCanvas.width, this.committedCanvas.height);
+    canvas.getContext("2d").drawImage(this.committedCanvas, 0, 0);
+    this.compositionCheckpoints.push({ index: this.operations.length, canvas, width: canvas.width, height: canvas.height });
+    if (this.compositionCheckpoints.length > 12) this.compositionCheckpoints.shift();
+  }
+  rebuildFrom(view, changedIndex = 0) {
     this.backgroundColor = view.backgroundColor;
-    this.operations = view.operations.map(operation => ({ type: "drawable", id: operation.id, drawable: structuredClone(operation.drawable) }));
-    this.preview = null; this.disposeLivePreview(); this.tiles.clear(); this.preparedDrawables.clear(); this.rebuildBase(); this.invalidateCommittedView(); this.rerender();
+    this.operations = view.operations.map(rasterOperation);
+    this.paintSessions.clear(); this.immediateCtx.clearRect(0, 0, this.immediateCanvas.width, this.immediateCanvas.height); this.hasImmediatePixels = false; this.immediateIsComposite = false; this.activeReconcilePending = false;
+    this.preview = null; this.disposeLivePreview(); this.tiles.clear(); this.preparedDrawables.clear(); this.rebuildBase();
+    this.compositionCheckpoints = this.compositionCheckpoints.filter(checkpoint => checkpoint.index <= changedIndex && checkpoint.width === this.committedCanvas.width && checkpoint.height === this.committedCanvas.height);
+    const checkpoint = this.compositionCheckpoints.at(-1);
+    if (checkpoint) {
+      this.committedCtx.clearRect(0, 0, this.committedCanvas.width, this.committedCanvas.height); this.committedCtx.drawImage(checkpoint.canvas, 0, 0);
+      const sx = this.canvas.width / this.materialBounds.width, sy = this.canvas.height / this.materialBounds.height;
+      for (let index = checkpoint.index; index < this.operations.length; index += 1) this.paintOperation(this.operations[index], this.committedCtx, { periodic: true, transform: { x: -this.materialBounds.left, y: -this.materialBounds.top, sx, sy } });
+      this.committedDirty = false;
+    } else this.invalidateCommittedView();
+    this.rerender(); this.captureCompositionCheckpoint();
+  }
+  reconcileImmediateRaster() {
+    this.immediateCtx.clearRect(0, 0, this.immediateCanvas.width, this.immediateCanvas.height); this.hasImmediatePixels = false; this.immediateIsComposite = false;
+    this.activeReconcilePending = true;
+  }
+  rebuildActiveImmediateRaster() {
+    this.activeReconcilePending = false;
+    // Completed operations are now represented by the reconstructed committed
+    // material. Only active/finishing sessions are redrawn into the overlay.
+    for (const session of this.paintSessions.values()) {
+      if (!session.drawable?.points?.length) continue;
+      session.renderer = createPaintSessionRenderer({ ...session.drawable, points: [] });
+      const batches = session.renderer?.advance(session.drawable) || [];
+      session.consumed = session.drawable.points.length;
+      this.paintSessionInstructions(batches);
+    }
   }
   applyChange(change, view) {
     if (!change) return false;
     if (change.type === "append") {
       this.preview = null; this.disposeLivePreview();
-      this.appendOperation({ type: "drawable", id: change.id, drawable: structuredClone(change.drawable) });
+      if (change.operation?.type === "GeneratorOperation") this.rebuildFrom(view, change.index);
+      else this.appendOperation(rasterOperation(change.operation));
       return true;
     }
-    if (change.type === "background") { this.backgroundColor = change.after; this.disposeLivePreview(); this.invalidateCommittedView(); this.rerender(); return true; }
-    if (change.type === "clear") { this.preview = null; this.disposeLivePreview(); this.operations = []; this.tiles.clear(); this.preparedDrawables.clear(); this.renderIndex.clear(); this.staticPrefixEnd = 0; this.staticCheckpoints = []; this.invalidateCommittedView(); this.rerender(); return true; }
+    if (change.type === "background") { this.backgroundColor = change.after; this.disposeLivePreview(); this.reconcileImmediateRaster(); this.invalidateCommittedView(); this.rerender(); return true; }
+    if (change.type === "clear") { this.preview = null; this.disposeLivePreview(); this.paintSessions.clear(); this.immediateCtx.clearRect(0, 0, this.immediateCanvas.width, this.immediateCanvas.height); this.hasImmediatePixels = false; this.immediateIsComposite = false; this.activeReconcilePending = false; this.operations = []; this.tiles.clear(); this.preparedDrawables.clear(); this.renderIndex.clear(); this.staticPrefixEnd = 0; this.staticCheckpoints = []; this.compositionCheckpoints = []; this.invalidateCommittedView(); this.rerender(); return true; }
     // Replacement and undo have non-local z-order effects. Rebuild from the
     // authoritative document rather than guessing from two snapshots.
-    this.rebuildFrom(view); return true;
+    this.rebuildFrom(view, change.index || 0); return true;
   }
-  setTime(time) { const next = Number(time); if (!Number.isFinite(next) || next === this.time) return false; this.time = next; if (!this.operations.some(op => drawableDependsOnTime(op.drawable)) && !drawableDependsOnTime(this.preview)) return false; this.tiles.clear(); this.rebuildRenderIndex(); this.baseCtx.clearRect(0, 0, this.width, this.height); this.baseCtx.drawImage(this.baseStaticCanvas, 0, 0); for (let i = this.staticPrefixEnd; i < this.operations.length; i += 1) this.paintOperation(this.operations[i], this.baseCtx); this.invalidateCommittedView(); this.rerender(); return true; }
+  setTime(time) { const next = Number(time); if (!Number.isFinite(next) || next === this.time) return false; this.time = next; if (!this.operations.some(op => drawableDependsOnTime(op.drawable)) && !drawableDependsOnTime(this.preview)) return false; this.reconcileImmediateRaster(); this.tiles.clear(); this.rebuildRenderIndex(); this.baseCtx.clearRect(0, 0, this.width, this.height); this.baseCtx.drawImage(this.baseStaticCanvas, 0, 0); for (let i = this.staticPrefixEnd; i < this.operations.length; i += 1) this.paintOperation(this.operations[i], this.baseCtx); this.invalidateCommittedView(); this.rerender(); return true; }
 
   appendOperation(operation) {
     this.operations.push(operation);
@@ -168,7 +221,7 @@ export class DrawingRasterizer {
     else this.appendStaticOperationToCachedTiles(operation);
     this.staticPrefixEnd = this.operations.findIndex(op => drawableDependsOnTime(op.drawable));
     if (this.staticPrefixEnd < 0) this.staticPrefixEnd = this.operations.length;
-    if (["fiber", "hair"].includes(operation.drawable?.style?.brush)) this.staticCheckpoints.push({ index: this.operations.length, canvas: this.baseStaticCanvas });
+    if (needsStaticBrushCheckpoint(operation.drawable?.style)) this.staticCheckpoints.push({ index: this.operations.length, canvas: this.baseStaticCanvas });
     if (!timeDependent && this.appendStaticOperationToCommittedView(operation)) {
       this.rerender();
     } else {
@@ -251,7 +304,9 @@ export class DrawingRasterizer {
       const pixelHeight = Math.max(1, Math.min(MAX_MATERIAL_PIXELS, Math.round(this.materialBounds.height * nextScale)));
       this.canvas.width = pixelWidth; this.canvas.height = pixelHeight;
       this.committedCanvas.width = pixelWidth; this.committedCanvas.height = pixelHeight;
+      this.immediateCanvas.width = pixelWidth; this.immediateCanvas.height = pixelHeight;
       this.ctx = this.canvas.getContext("2d"); this.committedCtx = this.committedCanvas.getContext("2d");
+      this.immediateCtx = this.immediateCanvas.getContext("2d"); this.reconcileImmediateRaster();
       this.invalidateCommittedView(); this.materialRebuildCount += 1; this.composeMaterial(); this.markFrameChanged(); return true;
     }, () => this.perfMetadata({ changed: true, reason: "material-resolution" }));
   }
@@ -282,16 +337,89 @@ export class DrawingRasterizer {
     const metadata = this.perfMetadata();
     return measure("Drawing material composition", () => {
       if (this.committedDirty) this.composeCommittedMaterial();
+      if (this.activeReconcilePending) this.rebuildActiveImmediateRaster();
       const sx = this.canvas.width / this.materialBounds.width, sy = this.canvas.height / this.materialBounds.height;
       this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height); this.ctx.save(); this.ctx.globalAlpha = 1;
       count("Drawing committed canvas drawImage", () => this.perfMetadata());
-      this.ctx.drawImage(this.committedCanvas, 0, 0);
+      if (this.hasImmediatePixels && this.immediateIsComposite) this.ctx.drawImage(this.immediateCanvas, 0, 0);
+      else { this.ctx.drawImage(this.committedCanvas, 0, 0); if (this.hasImmediatePixels) this.ctx.drawImage(this.immediateCanvas, 0, 0); }
       if (this.livePreview) this.ctx.drawImage(this.livePreview.canvas, 0, 0);
       else if (this.preview) this.paintDrawable(this.preview, this.ctx, { preview: true, periodic: true, transform: { x: -this.materialBounds.left, y: -this.materialBounds.top, sx, sy } });
       this.ctx.restore();
     }, metadata);
   }
   rerender() { return measure("Drawing rerender", () => { this.composeMaterial(); this.markFrameChanged(); }, () => this.perfMetadata()); }
+  hasPaintSessions() { return this.paintSessions.size > 0; }
+  beginPaintSession(drawable) {
+    // A transient renderer decides whether its current input prefix is visible.
+    if (!isPaintSessionDrawable(drawable)) return null;
+    const textureId = brushTextureId(drawable.style);
+    if (textureId && !brushTextureCatalog.get(textureId)) this.requestTextureReplay(textureId);
+    const renderer = createPaintSessionRenderer(drawable);
+    const id = `paint-session-${globalThis.crypto?.randomUUID?.() || Math.random()}`;
+    this.paintSessions.set(id, { drawable: structuredClone(drawable), renderer, consumed: 0, finishing: false });
+    this.advancePaintSession(id, drawable);
+    return id;
+  }
+  paintImmediateDrawable(drawable, { preview = false } = {}) {
+    const sx = this.canvas.width / this.materialBounds.width, sy = this.canvas.height / this.materialBounds.height;
+    this.paintDrawable(drawable, this.immediateCtx, { preview, periodic: true, transform: { x: -this.materialBounds.left, y: -this.materialBounds.top, sx, sy } }); this.hasImmediatePixels = true;
+  }
+  ensureCompositeImmediate() {
+    if (this.immediateIsComposite) return;
+    if (this.committedDirty) this.composeCommittedMaterial();
+    const composite = createPaintCanvas(this.canvas.width, this.canvas.height), context = composite.getContext("2d");
+    context.drawImage(this.committedCanvas, 0, 0);
+    if (this.hasImmediatePixels) context.drawImage(this.immediateCanvas, 0, 0);
+    this.immediateCanvas = composite; this.immediateCtx = context;
+    this.hasImmediatePixels = true; this.immediateIsComposite = true;
+  }
+  paintSessionInstructions(batches = []) {
+    const sx = this.canvas.width / this.materialBounds.width, sy = this.canvas.height / this.materialBounds.height;
+    let painted = false;
+    for (const batch of batches) {
+      if (!batch?.instructions?.length || !batch.bounds) continue;
+      if (batch.requiresBackdrop) this.ensureCompositeImmediate();
+      this.immediateCtx.save(); this.immediateCtx.translate(-this.materialBounds.left * sx, -this.materialBounds.top * sy); this.immediateCtx.scale?.(sx, sy);
+      for (const translation of periodicTranslations(batch.bounds, this.materialBounds, this.materialBounds)) { this.immediateCtx.save(); this.immediateCtx.translate(translation.x, translation.y); paintBrushInstructions(this.immediateCtx, batch.instructions); this.immediateCtx.restore(); }
+      this.immediateCtx.restore(); painted = true;
+    }
+    if (painted) this.hasImmediatePixels = true;
+    return painted;
+  }
+  advancePaintSession(id, drawable) {
+    const session = this.paintSessions.get(id);
+    if (!session || !isPaintSessionDrawable(drawable)) return false;
+    if (drawable.points.length < session.consumed || !session.renderer?.acceptsStyle(drawable.style)) return false;
+    session.drawable = structuredClone(drawable);
+    this.paintSessionInstructions(session.renderer.advance(drawable, session.consumed));
+    session.consumed = drawable.points.length;
+    this.rerender(); return true;
+  }
+  schedulePaintFinish(id) {
+    const schedule = globalThis.requestAnimationFrame || (callback => setTimeout(() => callback(performance.now()), 16));
+    schedule(() => {
+      const session = this.paintSessions.get(id); if (!session || !session.finishing) return;
+      const deposited = this.paintSessionInstructions(session.renderer?.settle?.());
+      if (session.renderer?.isFinished) this.completePaintSession(id);
+      else { if (deposited) this.rerender(); this.schedulePaintFinish(id); }
+    });
+  }
+  completePaintSession(id) {
+    const session = this.paintSessions.get(id); if (!session) return null;
+    this.paintSessions.delete(id); const drawable = structuredClone(session.drawable), bounds = session.renderer?.bounds || session.bounds || null;
+    session.renderer?.dispose?.(); session.onComplete?.(drawable, bounds); return drawable;
+  }
+  finishPaintSession(id, onComplete = null) {
+    const session = this.paintSessions.get(id); if (!session) return false;
+    session.finishing = true; session.onComplete = onComplete;
+    if (session.renderer?.beginFinish) { session.renderer.beginFinish(); if (!session.renderer.isFinished) { this.schedulePaintFinish(id); return true; } }
+    this.completePaintSession(id); return true;
+  }
+  commitImmediatePaint(operation, bounds = null) {
+    const raster = rasterOperation(operation); this.operations.push(raster);
+    this.renderIndex.add(raster, bounds ? padBounds(bounds) : this.boundsForOperation(raster), this.materialBounds);
+  }
   paintOperation(operation, context, options = {}) { return this.paintDrawable(operation.drawable, context, { ...options, prepared: this.prepareOperation(operation) }); }
   paintCachedOperation(operation, context, tile) {
     if (operation.type === "clear") { context.clearRect(0, 0, tile?.width || this.canvas.width, tile?.height || this.canvas.height); return; }
@@ -300,8 +428,9 @@ export class DrawingRasterizer {
   paintDrawable(drawable, context = this.ctx, { preview = false, tile = null, transform = null, prepared = null, periodic = false } = {}) {
     const brushMeasurement = prepared?.brushMeasurement || measureBrushReplay(drawable, { tail: !preview });
     const path = brushMeasurement ? null : (prepared?.path || derivePath(drawable, { width: this.width, height: this.height, time: this.time })); if (!brushMeasurement && !path.contours.length) return;
-    if (["fiber", "hair"].includes(drawable.style.brush)) count("Drawing Fiber rasterization", () => this.perfMetadata({ preview, tile: tile ? { x: tile.x, y: tile.y } : null }));
-    if (drawable.style.brush === "texture" && !brushTextureCatalog.get(drawable.style.textureId)) { this.requestTextureReplay(drawable.style.textureId); return; }
+    count("Drawing brush rasterization", () => this.perfMetadata({ preview, tile: tile ? { x: tile.x, y: tile.y } : null }));
+    const textureId = brushTextureId(drawable.style);
+    if (textureId && !brushTextureCatalog.get(textureId)) { this.requestTextureReplay(textureId); return; }
     context.save();
     if (tile) { context.beginPath?.(); context.rect?.(0, 0, tile.width, tile.height); context.clip?.(); context.translate(-tile.x, -tile.y); }
     if (transform) { context.translate(transform.x * transform.sx, transform.y * transform.sy); context.scale?.(transform.sx, transform.sy); }
@@ -320,7 +449,7 @@ export class DrawingRasterizer {
     context.restore();
   }
   replayContours(context, contours, style, translation = { x: 0, y: 0 }, preview = false) { context.save(); context.translate(translation.x, translation.y); measure("Canvas brush replay", () => replayBrushContours(context, contours, preview ? { ...style, preview: true } : style), () => this.perfMetadata({ preview, contourCount: contours.length })); context.restore(); }
-  requestTextureReplay(textureId) { if (this.pendingTextureReplays.has(textureId)) return; this.pendingTextureReplays.add(textureId); brushTextureCatalog.ensure(textureId).then(texture => { if (texture) { this.tiles.clear(); this.invalidateCommittedView(); this.rerender(); } }).finally(() => this.pendingTextureReplays.delete(textureId)); }
+  requestTextureReplay(textureId) { if (this.pendingTextureReplays.has(textureId)) return; this.pendingTextureReplays.add(textureId); brushTextureCatalog.ensure(textureId).then(texture => { if (texture) { this.reconcileImmediateRaster(); this.tiles.clear(); this.invalidateCommittedView(); this.rerender(); } }).finally(() => this.pendingTextureReplays.delete(textureId)); }
 }
 
 /** Renderer-facing drawing source. Durable mutations are translated to ChangeSets. */
@@ -363,15 +492,29 @@ export class DrawingSource {
   prepareView(request) { return this.rasterizer.prepareView(request); }
   setTime(time) { return this.rasterizer.setTime(time); }
   previewDrawable(drawable) { return this.rasterizer.previewDrawable(drawable); }
+  hasPaintSessions() { return this.rasterizer.hasPaintSessions(); }
+  beginPaintSession(drawable) { return this.rasterizer.beginPaintSession(drawable); }
+  updatePaintSession(id, drawable) { return this.rasterizer.advancePaintSession(id, drawable); }
+  finishPaintSession(id) {
+    let committedId = null;
+    const started = this.rasterizer.finishPaintSession(id, (drawable, bounds) => {
+      const change = this.document.commit(drawable); if (!change) return;
+      this.rasterizer.commitImmediatePaint(change.operation, bounds); committedId = change.id;
+    });
+    return started ? committedId || true : null;
+  }
   getContentState() { return this.document.getContentState(); }
   restoreContentState(state) { const change = this.document.restoreContentState(state); if (!change) return false; this.rasterizer.rebuildFrom(this.document.getRenderView()); return true; }
   canUndo() { return this.document.canUndo(); }
   getDrawable(id) { return this.document.getDrawable(id); }
   findLatestDrawable(predicate) { return this.document.findLatest(predicate); }
-  commitDrawable(drawable) { const change = this.document.commit(drawable); if (!change) return null; this.rasterizer.applyChange(change, this.document.getRenderView()); return change.id; }
+  commitDrawable(drawable) {
+    if (drawable?.kind === "generatedStroke" && this.hasPaintSessions()) return null;
+    const change = this.document.commit(drawable); if (!change) return null; this.rasterizer.applyChange(change, this.document.getRenderView()); return change.id;
+  }
   beginReplaceAction(id) { return this.document.beginReplaceAction(id); }
   endReplaceAction() { this.document.endReplaceAction(); }
-  replaceDrawable(id, drawable) { const change = this.document.replace(id, drawable); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); return true; }
+  replaceDrawable(id, drawable) { if (drawable?.kind === "generatedStroke" && this.hasPaintSessions()) return false; const change = this.document.replace(id, drawable); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); return true; }
   setBackgroundColor(color) { const change = this.document.setBackgroundColor(color); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); return true; }
   undo() { const change = this.document.undo(); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); return true; }
   clear() { const change = this.document.clear(); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); return true; }

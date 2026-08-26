@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { BRUSHES, canReplayBrushPath, colorAtPathPosition, replayBrushContours, replayBrushPath } from "../brushes.js";
+import { BRUSHES, canReplayBrushPath, colorAtPathPosition, createPaintSessionRenderer, replayBrushContours, replayBrushPath } from "../brushes.js";
 import { brushTextureCatalog } from "../brush-textures.js";
 import { BrushPainter } from "../brush-painter.js";
 
@@ -31,6 +31,20 @@ const options = {
   color: "#ffffff", size: 10, opacity: .8, lines: 3, span: 20,
   nibRatio: .25, density: 4, particleSize: 2, tangent: { x: 1, y: 0 }
 };
+
+test("transient paint-session renderers expose brush-neutral batches and backdrop capability", () => {
+  const pen = createPaintSessionRenderer({ kind: "pathStroke", points: [], style: { ...options, brush: "pen", taper: "none" } });
+  const penBatches = pen.advance({ kind: "pathStroke", points: [{ x: 10, y: 12 }], style: { ...options, brush: "pen", taper: "none" } });
+  assert.equal(penBatches[0].requiresBackdrop, false);
+  assert.ok(penBatches[0].instructions.length);
+  assert.ok(penBatches[0].bounds.left < 10);
+
+  const wispStyle = { ...options, brush: "wisp", version: 1 };
+  const wisp = createPaintSessionRenderer({ kind: "pathStroke", points: [], style: wispStyle });
+  const wispBatches = wisp.advance({ kind: "pathStroke", points: [{ x: 10, y: 12 }, { x: 18, y: 15 }, { x: 26, y: 14 }, { x: 34, y: 20 }, { x: 42, y: 18 }], style: wispStyle });
+  assert.equal(wispBatches[0].requiresBackdrop, true);
+  assert.ok(wispBatches[0].instructions.length);
+});
 
 test("ribbon stamps one strand per configured line across its perpendicular span", () => {
   const ctx = new FakeContext2D();

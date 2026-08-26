@@ -42,6 +42,40 @@ test("commits immutable drawables, keeps previews out of history, and exposes so
   assert.deepEqual(source.getFrame().world, { origin: { x: 0, y: 0 }, extent: { width: 100, height: 100 }, scale: { width: 100, height: 100 }, wrap: "repeat" });
 }));
 
+test("paint sessions deposit before completion, persist typed records, and gate generators", () => withSource(() => {
+  const source = new DrawingSource({ width: 100, height: 100, createId: (() => { let n = 0; return () => `op-${++n}`; })() });
+  const session = source.beginPaintSession(drawable());
+  assert.ok(session);
+  assert.equal(source.operationCount, 0, "active paint is not history yet");
+  assert.equal(source.hasPaintSessions(), true);
+  assert.equal(source.commitDrawable(generatedDrawable()), null, "retained operations cannot mutate during paint");
+  const id = source.finishPaintSession(session);
+  assert.equal(id, "op-1");
+  assert.equal(source.hasPaintSessions(), false);
+  assert.deepEqual(source.getContentState().operations[0], { id, type: "PaintOperation", points: drawable().points, style: drawable().style });
+  const generator = source.commitDrawable(generatedDrawable());
+  assert.equal(source.getContentState().operations[1].type, "GeneratorOperation");
+  assert.equal(source.undo(), true, "creation, not a later generator edit, is undoable");
+  assert.equal(source.getDrawable(generator), null);
+}));
+
+test("an empty Wisp opens a session and commits only after its async release tail", async () => {
+  const previous = globalThis.OffscreenCanvas, queued = [];
+  globalThis.OffscreenCanvas = FakeOffscreenCanvas;
+  globalThis.requestAnimationFrame = callback => { queued.push(callback); return queued.length; };
+  try {
+    const source = new DrawingSource({ width: 100, height: 100 });
+    const session = source.beginPaintSession({ ...wispDrawable(), points: [] });
+    assert.ok(session, "an empty Wisp is valid transient input");
+    source.updatePaintSession(session, wispDrawable());
+    assert.equal(source.finishPaintSession(session), true);
+    assert.equal(source.operationCount, 0, "tail is still live, not durable");
+    for (let index = 0; index < 10000 && queued.length; index += 1) queued.shift()(index);
+    assert.equal(source.hasPaintSessions(), false);
+    assert.equal(source.operationCount, 1);
+  } finally { globalThis.OffscreenCanvas = previous; delete globalThis.requestAnimationFrame; }
+});
+
 test("clear destructively resets drawing history and persisted content", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
   const bounds = source.materialBounds;

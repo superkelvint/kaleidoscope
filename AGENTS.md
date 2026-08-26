@@ -61,7 +61,7 @@ rasterizer → source frame → renderer`. Read
 more than one drawing boundary.
 
 `drawing-document.js` exports `DrawingDocument`, the durable semantic truth:
-versioned operations with stable IDs, background, validation, single-level undo,
+schema-v3 `PaintOperation` / `GeneratorOperation` records with stable IDs, background, validation, single-level undo,
 replace-by-ID, destructive clear, and persistence. It owns no Canvas, renderer,
 time, texture, or cache state. Every mutation returns an explicit ChangeSet;
 never make the rasterizer infer changes by comparing snapshots.
