@@ -118,22 +118,34 @@ function snapshotColor(style, newest) {
   const t = clamp((transformed - low) / (high - low));
   return interpolateWispHcl(style.startColor || style.color, style.endColor || style.color, t);
 }
-function drawCurve(curve) {
+function writePoint(points, index, x, y) {
+  const point = points[index] || (points[index] = {});
+  point.x = x; point.y = y;
+  return point;
+}
+function drawCurve(curve, reusablePoints = null) {
   if (!curve.length) return null;
-  const points = [{ x: curve[0].x, y: curve[0].y }], lengthMinusOne = curve.length - 1;
+  const points = reusablePoints || [];
+  let pointCount = 0;
+  writePoint(points, pointCount++, curve[0].x, curve[0].y);
+  // A reusable buffer can still contain points from the preceding emission;
+  // trim it before `points.at(-1)` becomes the next quadratic's start.
+  points.length = pointCount;
+  const lengthMinusOne = curve.length - 1;
   let p1 = curve[1];
   // Exact source bounds: i = 1; i < curve.length - 2; i += 1.
   for (let index = 1; index < lengthMinusOne - 1; index += 1) {
     const p2 = curve[index + 1], start = points.at(-1), end = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
     for (let subdivision = 1; subdivision <= 3; subdivision += 1) {
       const t = subdivision / 3, inverse = 1 - t;
-      points.push({ x: inverse * inverse * start.x + 2 * inverse * t * p1.x + t * t * end.x, y: inverse * inverse * start.y + 2 * inverse * t * p1.y + t * t * end.y });
+      writePoint(points, pointCount++, inverse * inverse * start.x + 2 * inverse * t * p1.x + t * t * end.x, inverse * inverse * start.y + 2 * inverse * t * p1.y + t * t * end.y);
     }
     p1 = p2;
   }
+  points.length = pointCount;
   return points.length > 1 ? points : null;
 }
-function step(state) {
+function step(state, scratch = null) {
   const curve = state.curve;
   const scale = state.unitsPerPixel;
   const recipe = state.recipe;
@@ -169,8 +181,13 @@ function step(state) {
       }
     }
   }
-  const newest = curve.at(-1), points = drawCurve(curve);
-  return newest && points ? { points, newest: { life: newest.life, inputVx: newest.inputVx, inputVy: newest.inputVy } } : null;
+  const newest = curve.at(-1), points = drawCurve(curve, scratch?.points);
+  if (!newest || !points) return null;
+  if (!scratch) return { points, newest: { life: newest.life, inputVx: newest.inputVx, inputVy: newest.inputVy } };
+  scratch.newest.life = newest.life;
+  scratch.newest.inputVx = newest.inputVx;
+  scratch.newest.inputVy = newest.inputVy;
+  return scratch;
 }
 export function createWispSimulation(style = {}) {
   return {
@@ -179,7 +196,7 @@ export function createWispSimulation(style = {}) {
   };
 }
 /** Advance the deterministic simulation by exactly one durable input sample. */
-export function advanceWispSimulation(state, sample, emit = () => {}) {
+export function advanceWispSimulation(state, sample, emit = () => {}, scratch = null) {
   const next = { x: finite(sample?.x), y: finite(sample?.y) };
   const prior = state.prior || next;
   const inputVx = next.x - prior.x, inputVy = next.y - prior.y;
@@ -188,39 +205,91 @@ export function advanceWispSimulation(state, sample, emit = () => {}) {
   state.curve.push({ px: next.x, py: next.y, x: next.x, y: next.y, inputVx, inputVy, inputScreenVx, inputScreenVy, life: state.recipe.startLife });
   state.prior = next;
   for (let draw = 0; draw < state.recipe.drawsPerFrame; draw += 1) {
-    const emission = step(state); state.steps += 1;
+    const emission = step(state, scratch); state.steps += 1;
     if (emission) emit(emission);
     state.maxParticles = Math.max(state.maxParticles, state.curve.length);
   }
 }
 /** Settle the deterministic release tail after the final durable sample. */
-export function settleWispSimulation(state, emit = () => {}) {
+export function settleWispSimulation(state, emit = () => {}, scratch = null) {
   while (state.curve.length) {
-    const emission = step(state); state.steps += 1;
+    const emission = step(state, scratch); state.steps += 1;
     if (emission) emit(emission);
     state.maxParticles = Math.max(state.maxParticles, state.curve.length);
   }
 }
-function boundsForWispEmissions(emissions, style) {
+function createWispBounds(style) {
   const width = Math.max(.2, finite(style.size) / 8) * unitsPerPixel(style), pad = width / 2;
   let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
-  for (const emission of emissions) for (const point of emission.points) { left = Math.min(left, point.x - pad); top = Math.min(top, point.y - pad); right = Math.max(right, point.x + pad); bottom = Math.max(bottom, point.y + pad); }
-  return Number.isFinite(left) ? { left, top, right, bottom } : null;
+  return {
+    add(emission) {
+      for (const point of emission.points) { left = Math.min(left, point.x - pad); top = Math.min(top, point.y - pad); right = Math.max(right, point.x + pad); bottom = Math.max(bottom, point.y + pad); }
+    },
+    value() { return Number.isFinite(left) ? { left, top, right, bottom } : null; }
+  };
 }
-/** Computes transient complete-curve snapshots; no emission state is retained. */
+function boundsForWispEmissions(emissions, style) {
+  const bounds = createWispBounds(style);
+  for (const emission of emissions) bounds.add(emission);
+  return bounds.value();
+}
+function cloneEmission(emission) {
+  return {
+    points: emission.points.map(point => ({ x: point.x, y: point.y })),
+    newest: { life: emission.newest.life, inputVx: emission.newest.inputVx, inputVy: emission.newest.inputVy }
+  };
+}
+
+/**
+ * Run Wisp's deterministic simulation without retaining its emitted curves.
+ * Emissions are backed by one reusable scratch buffer and are valid only for
+ * the synchronous duration of `onEmission`; callers that need to keep one
+ * must clone it there.
+ */
+export function simulateWispPath(points, style = {}, { tail = true, onEmission = null, bounds = false } = {}) {
+  if (!Array.isArray(points) || !points.length) return { bounds: null, maxParticles: 0, steps: 0, emissionCount: 0, peakEmissionPoints: 0, retainedEmissionCount: 0 };
+  const state = createWispSimulation(style);
+  const scratch = { points: [], newest: { life: 0, inputVx: 0, inputVy: 0 } };
+  const measured = bounds ? createWispBounds(style) : null;
+  let emissionCount = 0, peakEmissionPoints = 0;
+  const emit = emission => {
+    emissionCount += 1;
+    peakEmissionPoints = Math.max(peakEmissionPoints, emission.points.length);
+    measured?.add(emission);
+    onEmission?.(emission);
+  };
+  for (const sample of points) advanceWispSimulation(state, sample, emit, scratch);
+  if (tail) settleWispSimulation(state, emit, scratch);
+  return { bounds: measured?.value() || null, maxParticles: state.maxParticles, steps: state.steps, emissionCount, peakEmissionPoints, retainedEmissionCount: 0 };
+}
+/** Compatibility API for callers that specifically need retained snapshots. */
 export function prepareWispPath(points, style = {}, { tail = true } = {}) {
-  if (!Array.isArray(points) || !points.length) return { emissions: [], bounds: null, maxParticles: 0, steps: 0 };
-  const state = createWispSimulation(style), emissions = [];
-  for (const sample of points) advanceWispSimulation(state, sample, emission => emissions.push(emission));
-  if (tail) settleWispSimulation(state, emission => emissions.push(emission));
-  return { emissions, bounds: boundsForWispEmissions(emissions, style), maxParticles: state.maxParticles, steps: state.steps };
+  const emissions = [];
+  const metadata = simulateWispPath(points, style, { tail, bounds: true, onEmission: emission => emissions.push(cloneEmission(emission)) });
+  return { emissions, bounds: metadata.bounds, maxParticles: metadata.maxParticles, steps: metadata.steps };
 }
 export function renderWispPrepared(target, prepared, style = {}) {
   const painter = toBrushPainter(target), opacity = clamp(finite(style.opacity)), recipe = wispRecipe(style);
   const width = Math.max(.2, finite(style.size) / 8) * unitsPerPixel(style);
   for (const emission of prepared.emissions) painter.polyline(emission.points, { color: snapshotColor(style, emission.newest), opacity: opacity * recipe.startOpacity * emission.newest.life / recipe.startLife, width, cap: "round", join: "round", composite: "lighter" });
 }
-export function renderWispPath(target, points, style, options) { const prepared = prepareWispPath(points, style, options); renderWispPrepared(target, prepared, style); return prepared; }
+/** Stream a one-shot Wisp replay directly into a painter. */
+export function renderWispPath(target, points, style = {}, options = {}) {
+  const painter = toBrushPainter(target), opacity = clamp(finite(style.opacity)), recipe = wispRecipe(style);
+  const width = Math.max(.2, finite(style.size) / 8) * unitsPerPixel(style);
+  return simulateWispPath(points, style, {
+    ...options,
+    onEmission(emission) {
+      painter.polyline(emission.points, { color: snapshotColor(style, emission.newest), opacity: opacity * recipe.startOpacity * emission.newest.life / recipe.startLife, width, cap: "round", join: "round", composite: "lighter" });
+      options.onEmission?.(emission);
+    }
+  });
+}
+
+/** Stream-only deterministic Wisp bounds; no curve snapshots are retained. */
+export function measureWispPath(points, style = {}, options = {}) {
+  return simulateWispPath(points, style, { ...options, bounds: true });
+}
 
 /** Transient, append-only preview protocol consumed by DrawingRasterizer. */
 export function createWispLivePreview(drawable) {

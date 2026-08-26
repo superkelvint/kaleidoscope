@@ -1,4 +1,4 @@
-import { BRUSHES, canReplayBrushPath, createLiveBrushPreview, prepareBrushReplay, renderPreparedBrush, replayBrushContours } from "./brushes.js";
+import { BRUSHES, canReplayBrushPath, createLiveBrushPreview, measureBrushReplay, renderBrushReplay, replayBrushContours } from "./brushes.js";
 import { brushTextureCatalog } from "./brush-textures.js";
 import { derivePath, drawableDependsOnTime, isDrawable } from "./drawable-path.js";
 import { count, measure } from "./perf.js";
@@ -206,9 +206,9 @@ export class DrawingRasterizer {
     const id = operation?.id;
     const dynamic = drawableDependsOnTime(operation?.drawable);
     if (!dynamic && id && this.preparedDrawables.has(id)) return this.preparedDrawables.get(id);
-    const brushPrepared = dynamic ? null : prepareBrushReplay(operation.drawable);
-    const path = dynamic || brushPrepared ? null : derivePath(operation.drawable, { width: this.width, height: this.height, time: this.time });
-    const prepared = { dynamic, brushPrepared: Boolean(brushPrepared), path, bounds: brushPrepared ? brushPrepared.bounds && { left: Math.floor(brushPrepared.bounds.left - ANTIALIAS_PADDING), top: Math.floor(brushPrepared.bounds.top - ANTIALIAS_PADDING), right: Math.ceil(brushPrepared.bounds.right + ANTIALIAS_PADDING), bottom: Math.ceil(brushPrepared.bounds.bottom + ANTIALIAS_PADDING) } : path ? boundsForPath(path, operation.drawable.style) : null };
+    const brushMeasurement = dynamic ? null : measureBrushReplay(operation.drawable);
+    const path = dynamic || brushMeasurement ? null : derivePath(operation.drawable, { width: this.width, height: this.height, time: this.time });
+    const prepared = { dynamic, brushMeasurement, path, bounds: brushMeasurement ? brushMeasurement.bounds && { left: Math.floor(brushMeasurement.bounds.left - ANTIALIAS_PADDING), top: Math.floor(brushMeasurement.bounds.top - ANTIALIAS_PADDING), right: Math.ceil(brushMeasurement.bounds.right + ANTIALIAS_PADDING), bottom: Math.ceil(brushMeasurement.bounds.bottom + ANTIALIAS_PADDING) } : path ? boundsForPath(path, operation.drawable.style) : null };
     if (!dynamic && id) this.preparedDrawables.set(id, prepared);
     return prepared;
   }
@@ -298,8 +298,8 @@ export class DrawingRasterizer {
     this.paintOperation(operation, context, { tile, periodic: true });
   }
   paintDrawable(drawable, context = this.ctx, { preview = false, tile = null, transform = null, prepared = null, periodic = false } = {}) {
-    const brushPrepared = prepareBrushReplay(drawable, { tail: !preview });
-    const path = brushPrepared ? null : (prepared?.path || derivePath(drawable, { width: this.width, height: this.height, time: this.time })); if (!brushPrepared && !path.contours.length) return;
+    const brushMeasurement = prepared?.brushMeasurement || measureBrushReplay(drawable, { tail: !preview });
+    const path = brushMeasurement ? null : (prepared?.path || derivePath(drawable, { width: this.width, height: this.height, time: this.time })); if (!brushMeasurement && !path.contours.length) return;
     if (["fiber", "hair"].includes(drawable.style.brush)) count("Drawing Fiber rasterization", () => this.perfMetadata({ preview, tile: tile ? { x: tile.x, y: tile.y } : null }));
     if (drawable.style.brush === "texture" && !brushTextureCatalog.get(drawable.style.textureId)) { this.requestTextureReplay(drawable.style.textureId); return; }
     context.save();
@@ -308,13 +308,13 @@ export class DrawingRasterizer {
     const target = tile
       ? { left: tile.x, top: tile.y, width: tile.width, height: tile.height }
       : this.materialBounds;
-    const replay = brushPrepared;
+    const replay = brushMeasurement;
     const bounds = replay ? replay.bounds && { left: replay.bounds.left - ANTIALIAS_PADDING, top: replay.bounds.top - ANTIALIAS_PADDING, right: replay.bounds.right + ANTIALIAS_PADDING, bottom: replay.bounds.bottom + ANTIALIAS_PADDING } : boundsForPath(path, drawable.style);
     const translations = periodic
       ? periodicTranslations(bounds, this.materialBounds, target)
       : [{ x: 0, y: 0 }];
     for (const translation of translations) {
-      if (replay) { context.save(); context.translate(translation.x, translation.y); renderPreparedBrush(context, replay, drawable.style); context.restore(); }
+      if (replay) { context.save(); context.translate(translation.x, translation.y); renderBrushReplay(context, drawable, { tail: !preview }); context.restore(); }
       else this.replayContours(context, path.contours, drawable.style, translation, preview);
     }
     context.restore();

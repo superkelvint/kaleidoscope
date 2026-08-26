@@ -1,7 +1,7 @@
 import { brushTextureCatalog } from "./brush-textures.js";
 import { measure } from "./perf.js";
 import { renderFiberPath } from "./fiber-brush.js";
-import { createWispLivePreview, prepareWispPath, renderWispPath, renderWispPrepared } from "./wisp-brush.js";
+import { createWispLivePreview, measureWispPath, renderWispPath } from "./wisp-brush.js";
 import { BrushPainter, toBrushPainter } from "./brush-painter.js";
 
 const TAU = Math.PI * 2;
@@ -116,14 +116,16 @@ export function createLiveBrushPreview(drawable) {
   return drawable?.kind === "pathStroke" && drawable?.style?.brush === "wisp" ? createWispLivePreview(drawable) : null;
 }
 
-/** Some brushes have an authoritative transient replay preparation step. */
-export function prepareBrushReplay(drawable, { tail = true } = {}) {
-  if (drawable?.kind === "pathStroke" && drawable?.style?.brush === "wisp") return prepareWispPath(drawable.points, drawable.style, { tail });
+/** Compact brush replay metadata used by the rasterizer for culling/tiling. */
+export function measureBrushReplay(drawable, { tail = true } = {}) {
+  if (drawable?.kind === "pathStroke" && drawable?.style?.brush === "wisp") return measureWispPath(drawable.points, drawable.style, { tail });
   return null;
 }
 
-export function renderPreparedBrush(target, prepared, style) {
-  if (prepared) renderWispPrepared(target, prepared, style);
+/** Stream a brush whose durable drawable does not first derive a contour path. */
+export function renderBrushReplay(target, drawable, { tail = true } = {}) {
+  if (drawable?.kind === "pathStroke" && drawable?.style?.brush === "wisp") return renderWispPath(target, drawable.points, drawable.style, { tail });
+  return null;
 }
 
 /** A small deterministic generator for replaying a stored spray gesture. */

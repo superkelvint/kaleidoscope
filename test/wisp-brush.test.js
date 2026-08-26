@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { BrushPainter } from "../brush-painter.js";
-import { WISP_V1, advanceWispSimulation, createWispLivePreview, createWispSimulation, interpolateWispHcl, prepareWispPath, renderWispPath, wispNoise3d } from "../wisp-brush.js";
+import { WISP_V1, advanceWispSimulation, createWispLivePreview, createWispSimulation, interpolateWispHcl, measureWispPath, prepareWispPath, renderWispPath, renderWispPrepared, simulateWispPath, wispNoise3d } from "../wisp-brush.js";
 
 const style = { brush: "wisp", version: 1, color: "#ff0000", colorMode: "solid", size: 16, opacity: .8 };
 const path = [{ x: 10, y: 10 }, { x: 25, y: 16 }, { x: 42, y: 29 }, { x: 58, y: 25 }, { x: 72, y: 40 }];
@@ -45,6 +45,47 @@ test("Wisp preview is a prefix of the same deterministic simulation without a re
   const preview = prepareWispPath(path, style, { tail: false });
   const committed = prepareWispPath(path, style, { tail: true });
   assert.deepEqual(committed.emissions.slice(0, preview.emissions.length), preview.emissions);
+});
+
+test("Wisp streaming preserves retained replay geometry, metadata, and bounds", () => {
+  const fixtures = [
+    { name: "short", points: path.slice(0, 4), style, tail: false },
+    { name: "stationary hold", points: Array.from({ length: 7 }, () => ({ x: 20, y: 20 })), style, tail: true },
+    { name: "long", points: Array.from({ length: 24 }, (_, index) => ({ x: index * 3, y: 20 + Math.sin(index / 3) * 11 })), style, tail: false },
+    { name: "gradient", points: path, style: { ...style, colorMode: "gradient", startColor: "#ff0000", endColor: "#0044ff" }, tail: true },
+    { name: "dense persistent", points: path, style: { ...style, version: 2, density: 10, persistence: 300, energy: .8, momentum: .42, turbulence: 1.4 }, tail: false }
+  ];
+  for (const fixture of fixtures) {
+    const retained = prepareWispPath(fixture.points, fixture.style, { tail: fixture.tail });
+    const emitted = [];
+    const streamed = simulateWispPath(fixture.points, fixture.style, {
+      tail: fixture.tail,
+      bounds: true,
+      onEmission(emission) { emitted.push({ points: emission.points.map(point => ({ ...point })), newest: { ...emission.newest } }); }
+    });
+    assert.equal(streamed.steps, retained.steps, `${fixture.name}: step count`);
+    assert.equal(streamed.maxParticles, retained.maxParticles, `${fixture.name}: maximum particles`);
+    assert.equal(streamed.emissionCount, retained.emissions.length, `${fixture.name}: emission count`);
+    assert.equal(streamed.retainedEmissionCount, 0, `${fixture.name}: simulator retains no emissions`);
+    assert.deepEqual(emitted, retained.emissions, `${fixture.name}: emission geometry`);
+    assert.deepEqual(streamed.bounds, retained.bounds, `${fixture.name}: combined streaming bounds`);
+    assert.deepEqual(measureWispPath(fixture.points, fixture.style, { tail: fixture.tail }).bounds, retained.bounds, `${fixture.name}: bounds-only replay`);
+    const preparedPaint = [], streamedPaint = [];
+    renderWispPrepared(new BrushPainter(item => preparedPaint.push(item)), retained, fixture.style);
+    renderWispPath(new BrushPainter(item => streamedPaint.push(item)), fixture.points, fixture.style, { tail: fixture.tail });
+    assert.deepEqual(streamedPaint, preparedPaint, `${fixture.name}: painter deposition`);
+  }
+});
+
+test("Wisp long streamed replay retains only one emission scratch buffer", t => {
+  const points = Array.from({ length: 160 }, (_, index) => ({ x: index * 2, y: 80 + Math.sin(index / 7) * 24 }));
+  const startedAt = performance.now();
+  const result = renderWispPath(new BrushPainter(() => {}), points, { ...style, version: 2, density: 10, persistence: 300 }, { tail: false, bounds: true });
+  const elapsedMs = performance.now() - startedAt;
+  assert.equal(result.retainedEmissionCount, 0);
+  assert.ok(result.emissionCount > 0);
+  assert.ok(result.peakEmissionPoints > 0);
+  t.diagnostic(`streamed ${result.emissionCount} emissions in ${elapsedMs.toFixed(1)}ms; peak scratch polyline ${result.peakEmissionPoints} points; retained emissions ${result.retainedEmissionCount}`);
 });
 
 test("Wisp incremental simulation is exactly the authoritative no-tail replay", () => {
