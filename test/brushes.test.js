@@ -99,6 +99,13 @@ test("spray emits its configured number of round particles", () => {
   assert.ok(particles.every(([, x, y, radius]) => Math.hypot(x - 50, y - 50) <= 5 && radius === 1));
 });
 
+test("low-density Spray spaces bursts apart instead of following every pointer sample", () => {
+  const ctx = new FakeContext2D();
+  const path = Array.from({ length: 21 }, (_, x) => ({ x, y: 20 }));
+  replayBrushPath(ctx, path, { ...options, brush: "spray", density: 1, size: 10, particleSize: 1, seed: 4 });
+  assert.equal(ctx.calls.filter(([name]) => name === "arc").length, 2, "a 20-unit path emits only its initial and one spaced burst");
+});
+
 test("pen and spray retain immediate pointer-down marks", () => {
   const penContext = new FakeContext2D();
   BRUSHES.pen.begin(penContext, { x: 50, y: 50 }, options);

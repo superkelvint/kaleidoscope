@@ -72,6 +72,18 @@ function periodicTranslations(bounds, material, target) {
   for (let y = minY; y <= maxY; y += 1) for (let x = minX; x <= maxX; x += 1) translations.push({ x: x * material.width, y: y * material.height });
   return translations;
 }
+function hasChangedPaintGeometry(previous = [], next = [], count = 0) {
+  if (previous.length < count || next.length < count) return true;
+  for (let index = 0; index < count; index += 1) {
+    // Paint-session samples can be compacted by the controller to keep the
+    // durable path bounded. A compacted prefix has the same length as the
+    // already-consumed prefix, but different coordinates (or hold counts).
+    const { holdCount: previousHold, ...previousPoint } = previous[index] || {};
+    const { holdCount: nextHold, ...nextPoint } = next[index] || {};
+    if (JSON.stringify(previousPoint) !== JSON.stringify(nextPoint)) return true;
+  }
+  return false;
+}
 /** Derived Canvas2D state only: tiles, finite material, previews, and raster revisions. */
 export class DrawingRasterizer {
   constructor({ width = 2048, height = 2048, onFrameChange = () => {} } = {}) {
@@ -390,7 +402,14 @@ export class DrawingRasterizer {
   advancePaintSession(id, drawable) {
     const session = this.paintSessions.get(id);
     if (!session || !isPaintSessionDrawable(drawable)) return false;
-    if (drawable.points.length < session.consumed || !session.renderer?.acceptsStyle(drawable.style)) return false;
+    if (!session.renderer?.acceptsStyle(drawable.style)) return false;
+    if (drawable.points.length <= session.consumed && hasChangedPaintGeometry(session.drawable.points, drawable.points, session.consumed)) {
+      // The active path was compacted in-place rather than extended. Its
+      // previous incremental renderer cannot consume those replacement
+      // samples, so rebuild the transient overlay from its current path.
+      session.drawable = structuredClone(drawable);
+      this.reconcileImmediateRaster(); this.rerender(); return true;
+    }
     session.drawable = structuredClone(drawable);
     this.paintSessionInstructions(session.renderer.advance(drawable, session.consumed));
     session.consumed = drawable.points.length;
@@ -419,6 +438,13 @@ export class DrawingRasterizer {
   commitImmediatePaint(operation, bounds = null) {
     const raster = rasterOperation(operation); this.operations.push(raster);
     this.renderIndex.add(raster, bounds ? padBounds(bounds) : this.boundsForOperation(raster), this.materialBounds);
+    // The immediate overlay can be cleared when an active brush replaces its
+    // prefix (Spray holds do this at its fixed rate). Make completed samples
+    // available to the committed composition first, so clearing that overlay
+    // never erases an earlier completed stroke.
+    this.appendStaticOperationToCachedTiles(raster);
+    this.staticPrefixEnd = this.operations.length;
+    this.invalidateCommittedView();
   }
   paintOperation(operation, context, options = {}) { return this.paintDrawable(operation.drawable, context, { ...options, prepared: this.prepareOperation(operation) }); }
   paintCachedOperation(operation, context, tile) {

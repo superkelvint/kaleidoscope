@@ -176,6 +176,24 @@ test("freehand reduction does not double-count sampled hold deposition", () => {
   assert.equal(points.reduce((total, point) => total + (point.holdCount || 0), 0), 3);
 });
 
+test("freehand keeps its complete sample stream until the active stroke ends", () => {
+  const updates = [], commits = [];
+  const source = {
+    width: 1000, height: 100,
+    beginPaintSession: () => "active",
+    updatePaintSession: (_, drawable) => updates.push(drawable),
+    finishPaintSession() {}, previewDrawable() {},
+    commitDrawable: drawable => commits.push(drawable)
+  };
+  const controller = new DrawingController({ source });
+  controller.begin(event("down", 0, 50), canvas);
+  for (let index = 1; index <= 700; index += 1) controller.capture({ x: index - 1, y: 50 }, { x: index, y: 50 }, controller.current);
+  assert.ok(controller.current.points.length > 512, "the active paint session never compacts its input prefix");
+  controller.end(event("up", 700, 50));
+  assert.equal(updates.at(-1).points.length, 512, "only the durable completed stroke is compacted");
+  assert.equal(commits.length, 0, "the active-session path uses its normal completion seam");
+});
+
 test("Ctrl snapping constrains both initial and final freehand samples", () => {
   const commits = [];
   const source = { width: 100, height: 100, previewDrawable() {}, commitDrawable: drawable => { commits.push(drawable); return true; } };

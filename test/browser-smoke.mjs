@@ -60,6 +60,15 @@ try {
   assert.equal(await page.evaluate(() => window.__KALEIDOSCOPE_TEST_HOOKS__.drawingSource.operationCount), 0, "Undo removes the latest drawing");
   await page.locator("#undoDrawing").click();
   assert.equal(await page.evaluate(() => window.__KALEIDOSCOPE_TEST_HOOKS__.drawingSource.operationCount), 0, "a second Undo is consumable and does nothing");
+  await page.locator("#drawingBrush").selectOption("spray");
+  await page.locator("#drawingDensity").evaluate(input => { input.value = "3"; input.dispatchEvent(new Event("input", { bubbles: true })); });
+  await drawSpray(page, canvas, 270);
+  const firstSpray = await drawingEnergy(page);
+  await drawSpray(page, canvas, 350);
+  const secondSpray = await drawingEnergy(page);
+  assert.equal(secondSpray.operationCount, 2, "two browser Spray gestures both commit through the controller");
+  assert.equal(secondSpray.brushes.every(brush => brush === "spray"), true, "the committed gestures retain Spray rather than falling back to Pen");
+  assert.ok(secondSpray.energy > firstSpray.energy, "a later timed Spray gesture retains the earlier committed spray");
   await page.locator("#sourceImage").click();
   await page.locator("#sourceDrawing").click();
   const box = await canvas.boundingBox(); assert.ok(box);
@@ -149,4 +158,26 @@ async function drawWisp(page, canvas) {
     await page.mouse.move(start + (end - start) * i / 8, y);
   }
   await page.mouse.up(); await page.waitForTimeout(50);
+}
+
+async function drawSpray(page, canvas, y) {
+  const box = await canvas.boundingBox(); assert.ok(box, "canvas has bounds");
+  const start = box.x + 170, end = box.x + Math.min(box.width - 150, 330);
+  await page.mouse.move(start, box.y + y); await page.mouse.down();
+  for (let i = 1; i <= 5; i += 1) {
+    await page.waitForTimeout(24);
+    await page.mouse.move(start + (end - start) * i / 5, box.y + y);
+  }
+  await page.waitForTimeout(48); await page.mouse.up(); await page.waitForTimeout(50);
+}
+
+async function drawingEnergy(page) {
+  return page.evaluate(() => {
+    const { drawingSource } = window.__KALEIDOSCOPE_TEST_HOOKS__;
+    const context = drawingSource.getFrame().pixels.getContext("2d");
+    const pixels = context.getImageData(0, 0, drawingSource.width, drawingSource.height).data;
+    let energy = 0;
+    for (let index = 0; index < pixels.length; index += 64) energy += pixels[index] + pixels[index + 1] + pixels[index + 2];
+    return { energy, operationCount: drawingSource.operationCount, brushes: drawingSource.getContentState().operations.map(operation => operation.style?.brush) };
+  });
 }

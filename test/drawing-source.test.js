@@ -59,6 +59,51 @@ test("paint sessions deposit before completion, persist typed records, and gate 
   assert.equal(source.getDrawable(generator), null);
 }));
 
+test("a compacted active Pen path reconciles its replacement prefix", () => withSource(() => {
+  const source = new DrawingSource({ width: 2048, height: 100 });
+  const points = Array.from({ length: 512 }, (_, index) => ({ x: index, y: 30 }));
+  const session = source.beginPaintSession({ ...drawable(), points });
+  const context = source.rasterizer.immediateCtx;
+  context.calls.length = 0;
+  const compacted = Array.from({ length: 512 }, (_, index) => ({ x: index * 2, y: 30 }));
+
+  assert.equal(source.updatePaintSession(session, { ...drawable(), points: compacted }), true);
+  assert.ok(context.calls.some(([name]) => name === "clearRect"), "replacement samples rebuild the active overlay");
+  assert.ok(context.calls.some(([name, x]) => name === "arc" && x === 1022), "the replacement path's new endpoint is painted");
+}));
+
+test("a compacted active Spray path remains a spray during reconciliation", () => withSource(() => {
+  const source = new DrawingSource({ width: 2048, height: 100 });
+  const points = Array.from({ length: 512 }, (_, index) => ({ x: index, y: 30 }));
+  const spray = { ...drawable(), points, style: { ...drawable().style, brush: "spray", density: 3, particleSize: 1 } };
+  const session = source.beginPaintSession(spray);
+  const context = source.rasterizer.immediateCtx;
+  context.calls.length = 0;
+  const compacted = { ...spray, points: Array.from({ length: 512 }, (_, index) => ({ x: index * 2, y: 30 })) };
+
+  assert.equal(source.updatePaintSession(session, compacted), true);
+  const particles = context.calls.filter(([name]) => name === "arc").length;
+  assert.ok(particles >= 3 && particles % 3 === 0, "every spaced Spray burst emits its configured particle population after compaction");
+}));
+
+test("a Spray hold update retains earlier completed sprays after it reconciles", () => withSource(() => {
+  const source = new DrawingSource({ width: 100, height: 100 });
+  const spray = points => ({ ...drawable(), points, style: { ...drawable().style, brush: "spray", density: 3, particleSize: 1 } });
+  const first = source.beginPaintSession(spray([{ x: 20, y: 20 }]));
+  assert.ok(source.finishPaintSession(first));
+  assert.equal(source.committedDirty, true, "a completed immediate stroke is queued for durable composition");
+
+  const second = source.beginPaintSession(spray([{ x: 70, y: 70 }]));
+  const cached = source.tile(0, 0);
+  assert.ok(cached.ctx.calls.some(([name]) => name === "arc"), "the first spray is present in the committed cache");
+  const immediate = source.rasterizer.immediateCtx;
+  immediate.calls.length = 0;
+  source.updatePaintSession(second, spray([{ x: 70, y: 70, holdCount: 1 }]));
+  assert.equal(source.operationCount, 1, "reconciling the active hold does not discard the completed spray");
+  assert.equal(immediate.calls.some(([name]) => name === "clearRect"), false, "a timed hold increment stays on Spray's incremental particle stream");
+  assert.equal(immediate.calls.filter(([name]) => name === "arc").length, 3, "the timed hold emits Spray's configured particle population");
+}));
+
 test("an empty Wisp opens a session and commits only after its async release tail", async () => {
   const previous = globalThis.OffscreenCanvas, queued = [];
   globalThis.OffscreenCanvas = FakeOffscreenCanvas;

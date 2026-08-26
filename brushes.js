@@ -63,6 +63,10 @@ function sprayStamp(target, point, options) {
   }
 }
 
+// Pointer samples are intentionally much denser than spray bursts so a low
+// density setting remains a scatter rather than turning into a dotted pen.
+function spraySpacing(options) { return Math.max(4, Number(options.size) * 1.5 || 4); }
+
 function penStamp(target, point, options) { roundStamp(target, point, options.size / 2, options); }
 
 function textureStamp(target, point, options) {
@@ -116,7 +120,7 @@ export const BRUSHES = {
 export function createImmediateBrushSession(style = {}) {
   const brush = BRUSHES[style.brush];
   if (!brush || ["fiber", "hair", "wisp"].includes(style.brush)) return null;
-  let previous = null, previousTangent = null, sampleCount = 0, travelled = 0, textureUntilStamp = 0;
+  let previous = null, previousTangent = null, sampleCount = 0, travelled = 0, textureUntilStamp = 0, sprayUntilStamp = 0;
   const random = style.brush === "spray" ? createSeededRandom(style.seed) : null;
   const maxTangentDistance = Math.max(Number(style.size) * 6 || 0, 64);
   const spacing = Math.max(1, Number(style.size) * Math.min(1, Math.max(.05, Number(style.spacing) || .25)));
@@ -139,6 +143,23 @@ export function createImmediateBrushSession(style = {}) {
           }
           const remainder = distance - consumed; travelled += remainder; textureUntilStamp -= remainder;
         } else textureUntilStamp = spacing;
+      }
+    } else if (style.brush === "spray") {
+      const options = optionsFor(tangent);
+      if (!previous) { sprayStamp(target, point, options); sprayUntilStamp = spraySpacing(options); }
+      else {
+        const dx = point.x - previous.x, dy = point.y - previous.y, distance = Math.hypot(dx, dy);
+        travelled += distance;
+        if (distance > .0001) {
+          const direction = { x: dx / distance, y: dy / distance };
+          let consumed = 0;
+          while (distance - consumed >= sprayUntilStamp) {
+            consumed += sprayUntilStamp;
+            sprayStamp(target, { x: previous.x + direction.x * consumed, y: previous.y + direction.y * consumed }, optionsFor(direction));
+            sprayUntilStamp = spraySpacing(options);
+          }
+          sprayUntilStamp -= distance - consumed;
+        }
       }
     } else {
       const options = optionsFor(tangent);
@@ -494,7 +515,7 @@ export function replayBrushPath(ctx, points, options, { closed = false } = {}) {
   }
   const replayOptions = { ...options };
   if (replayOptions.brush === "spray") replayOptions.random = createSeededRandom(replayOptions.seed);
-  let previousTangent = null;
+  let previousTangent = null, sprayUntilStamp = 0;
   const maxTangentDistance = Math.max(replayOptions.size * 6, 64);
   for (let index = 0; index < points.length; index += 1) {
     const point = points[index];
@@ -519,7 +540,20 @@ export function replayBrushPath(ctx, points, options, { closed = false } = {}) {
     } else if (replayOptions.brush === "calligraphy") {
       if (tangent) calligraphyStamp(ctx, point, stampOptions);
     } else if (replayOptions.brush === "spray") {
-      sprayStamp(ctx, point, stampOptions);
+      if (!index) { sprayStamp(ctx, point, stampOptions); sprayUntilStamp = spraySpacing(stampOptions); }
+      else {
+        const previous = points[index - 1], dx = point.x - previous.x, dy = point.y - previous.y, distance = Math.hypot(dx, dy);
+        if (distance > .0001) {
+          const direction = { x: dx / distance, y: dy / distance };
+          let consumed = 0;
+          while (distance - consumed >= sprayUntilStamp) {
+            consumed += sprayUntilStamp;
+            sprayStamp(ctx, { x: previous.x + direction.x * consumed, y: previous.y + direction.y * consumed }, { ...stampOptions, tangent: direction });
+            sprayUntilStamp = spraySpacing(stampOptions);
+          }
+          sprayUntilStamp -= distance - consumed;
+        }
+      }
       for (let repeat = 0; repeat < heldStampCount(point); repeat += 1) {
         sprayStamp(ctx, point, stampOptions);
       }

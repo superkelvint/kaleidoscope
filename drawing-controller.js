@@ -12,7 +12,7 @@ const clone = value => structuredClone(value);
 export class DrawingController {
   constructor({ source, getRendererState = () => ({}) }) {
     this.source = source; this.getRendererState = getRendererState;
-    this.settings = { tool: "freehand", brush: "pen", color: "#ffffff", colorMode: "solid", gradientStartColor: "#ffffff", gradientEndColor: "#ff4da6", size: 8, opacity: .85, lines: 5, span: 24, nibRatio: .22, density: 24, particleSize: 1.5, textureId: DEFAULT_BRUSH_TEXTURE_ID, textureSpacing: .25, textureRotationMode: "followStroke", assistLevel: .6, fibers: 6, gravity: 42, branching: 13, curl: 12, spread: .5, wispiness: .5, wispEnergy: .5, wispMomentum: .3, wispTurbulence: 1, wispPersistence: 150, wispDensity: 5, smoothing: .35 };
+    this.settings = { tool: "freehand", brush: "pen", color: "#ffffff", colorMode: "solid", gradientStartColor: "#ffffff", gradientEndColor: "#ff4da6", size: 8, opacity: .85, lines: 5, span: 24, nibRatio: .22, density: 8, particleSize: 1, textureId: DEFAULT_BRUSH_TEXTURE_ID, textureSpacing: .25, textureRotationMode: "followStroke", assistLevel: .6, fibers: 6, gravity: 42, branching: 13, curl: 12, spread: .5, wispiness: .5, wispEnergy: .5, wispMomentum: .3, wispTurbulence: 1, wispPersistence: 150, wispDensity: 5, smoothing: .35 };
     this.current = null; this.construction = null; this.timer = null; this.previewFrame = null;
   }
   getState() { return clone(this.settings); }
@@ -84,6 +84,7 @@ export class DrawingController {
       // the gesture without manufacturing an off-clock velocity impulse.
     }
     else if (!event.shiftKey) this.capture(c.last, this.interactionPoint(event, c), c);
+    if (c.style.brush !== "wisp") this.compactPoints(c.points);
     const drawable = { kind: "pathStroke", points: c.points.map(clone), style: clone(c.style) };
     if (c.paintSessionId) { this.source.updatePaintSession(c.paintSessionId, drawable); this.source.finishPaintSession(c.paintSessionId); }
     else { this.source.previewDrawable(null); if (canReplayBrushPath(drawable.points, drawable.style)) this.source.commitDrawable(drawable); }
@@ -95,7 +96,8 @@ export class DrawingController {
     // Immediate paint has no rollback. A cancellation completes the samples
     // already deposited, which also releases the generator-mutation gate.
     if (this.current?.paintSessionId) {
-      const c = this.current, drawable = { kind: "pathStroke", points: c.points.map(clone), style: clone(c.style) };
+      const c = this.current; if (c.style.brush !== "wisp") this.compactPoints(c.points);
+      const drawable = { kind: "pathStroke", points: c.points.map(clone), style: clone(c.style) };
       this.source.updatePaintSession(c.paintSessionId, drawable); this.source.finishPaintSession(c.paintSessionId);
     }
     this.cancelPreviewFrame(); this.current = null; this.construction = null; this.stopContinuous(); this.source.previewDrawable(null); return true;
@@ -122,8 +124,9 @@ export class DrawingController {
     if (globalThis.cancelAnimationFrame) globalThis.cancelAnimationFrame(this.previewFrame); else clearTimeout(this.previewFrame);
     this.previewFrame = null;
   }
-  capture(a, b, c) { const rect = c.canvas.getBoundingClientRect(), spp = Math.max(this.source.width / Math.max(rect.width, 1), this.source.height / Math.max(rect.height, 1)), steps = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / Math.min(2, Math.max(.5, c.style.size * .2 / spp)))); for (let i = 1; i <= steps; i += 1) { const p = this.map({ x: a.x + (b.x - a.x) * i / steps, y: a.y + (b.y - a.y) * i / steps }, c); this.pushPoint(c.points, p); } }
-  pushPoint(points, point) { if (points.length && Math.hypot(point.x - points.at(-1).x, point.y - points.at(-1).y) < .25) return; points.push({ ...point }); if (points.length <= 512) return; const reduced = Array.from({ length: 512 }, (_, i) => { const source = points[Math.round(i * (points.length - 1) / 511)]; return { x: source.x, y: source.y }; }); for (let i = 0; i < points.length; i += 1) { const held = Number(points[i].holdCount) || 0; if (held) { const target = Math.round(i * 511 / (points.length - 1)); reduced[target].holdCount = (Number(reduced[target].holdCount) || 0) + held; } } points.splice(0, points.length, ...reduced); }
+  capture(a, b, c) { const rect = c.canvas.getBoundingClientRect(), spp = Math.max(this.source.width / Math.max(rect.width, 1), this.source.height / Math.max(rect.height, 1)), steps = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / Math.min(2, Math.max(.5, c.style.size * .2 / spp)))); for (let i = 1; i <= steps; i += 1) { const p = this.map({ x: a.x + (b.x - a.x) * i / steps, y: a.y + (b.y - a.y) * i / steps }, c); this.pushPoint(c.points, p, { compact: false }); } }
+  pushPoint(points, point, { compact = true } = {}) { if (points.length && Math.hypot(point.x - points.at(-1).x, point.y - points.at(-1).y) < .25) return; points.push({ ...point }); if (compact) this.compactPoints(points); }
+  compactPoints(points) { if (points.length <= 512) return; const reduced = Array.from({ length: 512 }, (_, i) => { const source = points[Math.round(i * (points.length - 1) / 511)]; return { x: source.x, y: source.y }; }); for (let i = 0; i < points.length; i += 1) { const held = Number(points[i].holdCount) || 0; if (held) { const target = Math.round(i * 511 / (points.length - 1)); reduced[target].holdCount = (Number(reduced[target].holdCount) || 0) + held; } } points.splice(0, points.length, ...reduced); }
   count(points, c) { const rect = c.canvas.getBoundingClientRect(), spp = Math.max(this.source.width / rect.width, this.source.height / rect.height); let length = 0; for (let i = 1; i < points.length; i += 1) length += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y); return Math.min(512, Math.max(points.length, Math.ceil(length / Math.min(2, Math.max(.5, c.style.size * .2 / spp))) + 1)); }
   previewSmart(c) { const gesture = interpretGesture(c.displayPoints, c.context); if (!gesture) return this.source.previewDrawable(null); const points = sampleCanonicalGesture(gesture, this.count(gesture.points, c)).map(p => this.map(p, c)); this.source.previewDrawable({ kind: "pathStroke", points, style: c.style }); }
   snapWedge(p, c) { const mode = c.context.symmetryMode; if (!["radial", "mirrorRadial", "spiral"].includes(mode)) return p; if (!c.wedge) { const step = TAU / Math.max(2, Number(c.context.segments) || 2) / ((mode !== "radial" || c.context.mirror) ? 2 : 1), a = Math.round(Math.atan2(p.y - c.context.center.y, p.x - c.context.center.x) / step) * step; c.wedge = { x: Math.cos(a), y: Math.sin(a) }; } const dx = p.x - c.context.center.x, dy = p.y - c.context.center.y, d = dx * c.wedge.x + dy * c.wedge.y; return { x: c.context.center.x + c.wedge.x * d, y: c.context.center.y + c.wedge.y * d }; }
