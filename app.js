@@ -151,8 +151,8 @@ function loadReferenceImage(file) {
 function workspaceSnapshot() {
   return {
     state: renderer.getState(),
-    // Version 12 stores paths in the continuous drawing world. Earlier
-    // fixed-bitmap coordinates deliberately are not replayed into it.
+    // Paths remain continuous semantic geometry; the derived drawing material
+    // is finite and repeats at presentation time.
     drawing: { version: 2, settings: drawingController.getState(), content: drawingSource.getContentState() },
     sourceMode,
     showMirrorGuides,

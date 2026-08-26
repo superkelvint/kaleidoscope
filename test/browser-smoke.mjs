@@ -72,37 +72,41 @@ try {
     return gl ? gl.getError() : -1;
   });
   assert.equal(webglErrors, 0, "WebGL reports no errors");
-  const atlasDrift = await page.evaluate(() => {
+  const periodicDrift = await page.evaluate(async () => {
     const { drawingSource, renderer } = window.__KALEIDOSCOPE_TEST_HOOKS__;
-    const request = left => ({ worldBounds: { left, top: 0, right: left + 512, bottom: 512 }, pixelWidth: 512, pixelHeight: 512 });
-    let left = 0;
-    const source = {
-      getWorldScale: () => drawingSource.getWorldScale(),
-      getFrame: () => drawingSource.getFrame(),
-      prepareView: () => drawingSource.prepareView(request(left))
+    const energy = () => {
+      const canvas = document.querySelector("#gl"), gl = canvas.getContext("webgl2");
+      const pixels = new Uint8Array(gl.drawingBufferWidth * gl.drawingBufferHeight * 4);
+      gl.readPixels(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      return pixels.reduce((total, value, index) => total + (index % 4 === 3 ? 0 : value), 0);
     };
-    renderer.setSource(source);
-    renderer.sourceDiagnostics.textureSubUploads = 0;
-    const initialRevision = drawingSource.revision;
-    for (let index = 1; index <= 300; index += 1) {
-      left = index / 10;
-      renderer.syncSourceTexture();
-    }
-    const safe = { revision: drawingSource.revision, uploads: renderer.sourceDiagnostics.textureSubUploads };
-    left = 60;
-    renderer.syncSourceTexture();
-    const crossed = { revision: drawingSource.revision, uploads: renderer.sourceDiagnostics.textureSubUploads };
-    renderer.syncSourceTexture();
-    const repeated = { revision: drawingSource.revision, uploads: renderer.sourceDiagnostics.textureSubUploads, frame: drawingSource.getFrame() };
-    renderer.setSource(drawingSource);
-    return { initialRevision, safe, crossed, repeated };
+    const present = async patch => {
+      renderer.updateState({ segments: 2, mirror: false, symmetryMode: "radial", wallpaperMode: "single", zoom: 2, feedbackAmount: 0, bloomStrength: 0, ...patch }, { preview: false });
+      renderer.requestRender(); await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame);
+      return energy();
+    };
+    const initial = await present({ animate: false, panX: 0, panY: 0, rotationDeg: 0 });
+    const revision = drawingSource.revision, material = drawingSource.materialBounds, rebuilds = drawingSource.materialRebuildCount;
+    const diagnostics = renderer.getSourceDiagnostics();
+    const longDrift = await present({ animate: true, playing: false, driftMode: "linear", driftX: 1, driftY: 0, currentTime: 10000, panX: 0, panY: 0, rotationDeg: 0 });
+    const largePan = await present({ animate: false, panX: 100, panY: 100, rotationDeg: 0 });
+    const rotated = await present({ animate: false, panX: 0, panY: 0, rotationDeg: 3600 });
+    const afterMotionRevision = drawingSource.revision, afterMotionMaterial = drawingSource.materialBounds, afterMotionRebuilds = drawingSource.materialRebuildCount, afterMotionDiagnostics = renderer.getSourceDiagnostics();
+    const animatedId = drawingSource.commitDrawable({ kind: "generatedStroke", generator: "guillocheRosette", generatorVersion: 2, config: { petals: 8, secondaryFrequency: 13, primaryAmplitude: .08, secondaryAmplitude: .035, baseRadius: .2, rotation: 0, lineCount: 2, lineSpacing: .006, phaseOffset: 0 }, animation: { amount: .5, speed: .15, targets: { phaseOffset: true, secondaryAmplitude: false, secondaryFrequency: false, rotation: false } }, domain: { start: 0, end: Math.PI * 2 }, sampling: { mode: "parameter", step: .01 }, style: { brush: "pen", color: "#ffffff", colorMode: "solid", size: 4, opacity: 1, taper: "none", seed: 3 } });
+    const animatedStart = drawingSource.revision;
+    const mirrorRadial = await present({ animate: false, currentTime: 1, symmetryMode: "mirrorRadial", wallpaperMode: "single", panX: 0, panY: 0, rotationDeg: 0 });
+    const p6m = await present({ animate: false, currentTime: 2, symmetryMode: "radial", wallpaperMode: "p6m", panX: 0, panY: 0, rotationDeg: 0 });
+    return { initial, longDrift, largePan, rotated, mirrorRadial, p6m, animatedId, animatedStart, afterAnimationRevision: drawingSource.revision, revision, afterRevision: afterMotionRevision, material, afterMaterial: afterMotionMaterial, rebuilds, afterRebuilds: afterMotionRebuilds, diagnostics, afterDiagnostics: afterMotionDiagnostics };
   });
-  assert.equal(atlasDrift.safe.revision, atlasDrift.initialRevision, "safe linear drift does not revise the drawing atlas");
-  assert.equal(atlasDrift.safe.uploads, 0, "safe linear drift produces no texture sub-uploads");
-  assert.equal(atlasDrift.crossed.revision, atlasDrift.initialRevision + 1, "crossing the safe threshold recenters once");
-  assert.equal(atlasDrift.crossed.uploads, 1, "the recentered atlas uploads once");
-  assert.equal(atlasDrift.repeated.revision, atlasDrift.crossed.revision, "a repeated request stays in the new safe region");
-  assert.equal(atlasDrift.repeated.uploads, 1, "a repeated request does not upload again");
+  assert.ok(periodicDrift.initial > 100, "the baseline drawing material is visible");
+  assert.ok(periodicDrift.longDrift > 100, "linear drift at 10,000 periods never reaches permanent black");
+  assert.ok(periodicDrift.largePan > 100 && periodicDrift.rotated > 100, "large pan and repeated rotation continue sampling the material");
+  assert.ok(periodicDrift.mirrorRadial > 100 && periodicDrift.p6m > 100, "Mirror Radial and p6m sample the same periodic drawing material");
+  assert.ok(periodicDrift.animatedId && periodicDrift.afterAnimationRevision > periodicDrift.animatedStart, "animated Guilloché updates derived material while static Pen remains present");
+  assert.equal(periodicDrift.afterRevision, periodicDrift.revision, "pure source motion does not revise drawing pixels");
+  assert.deepEqual(periodicDrift.afterMaterial, periodicDrift.material, "source motion does not move the repeat domain");
+  assert.equal(periodicDrift.afterRebuilds, periodicDrift.rebuilds, "source motion does not rebuild the material");
+  assert.deepEqual(periodicDrift.afterDiagnostics, periodicDrift.diagnostics, "source motion does not upload unchanged drawing pixels");
   assert.deepEqual(errors, []);
 } finally {
   await browser?.close(); server.kill("SIGTERM");

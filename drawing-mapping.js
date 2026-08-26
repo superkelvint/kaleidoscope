@@ -30,7 +30,7 @@ export function screenToSourcePoint(event, displayCanvas, rendererState = {}, so
   const imageAspect = sourceWidth / sourceHeight;
   source.x = source.x / Math.max(imageAspect, .001) + (Number(rendererState.panX) || 0) + .5;
   source.y = source.y + (Number(rendererState.panY) || 0) + .5;
-  // Drawing sources are an unbounded world. Keep the renderer's source-space
-  // calculation intact, but deliberately do not fold it into one bitmap.
+  // Keep gestures locally unwrapped. The rasterizer folds translated copies
+  // into the finite periodic material, avoiding a false long segment at seams.
   return { x: source.x * sourceWidth, y: (1 - source.y) * sourceHeight };
 }

@@ -75,7 +75,7 @@ arrays, tiles, canvases, or atlas state.
 `DrawingRasterizer` owns all derived raster state: prepared drawable geometry
 and bounds keyed by operation ID, time-dependent derivation/evaluation, a
 RenderIndex (operation ID → z-order/bounds/dependencies and tile → relevant
-operation IDs), sparse tiles, prepared atlas, preview, texture readiness,
+operation IDs), sparse tiles, fixed periodic material, preview, texture readiness,
 invalidation, and frame revision. It remains WebGL-free and has no pointer,
 renderer mapping, tool, persistence, or DOM UI state. `DrawingSource.setTime`
 only forwards project time; it does not derive paths.
@@ -129,9 +129,9 @@ immutable brush `style`; it has no per-generator placement state.
 
 `DrawingRasterizer` evaluates generic paths at project time and rerenders only
 when committed or preview content depends on time. `DrawingSource` forwards the
-time update. Drawing is a continuous,
-unbounded drawing world: sparse tiles and prepared atlases paint each drawable
-only at its actual world coordinates. Brushes remain
+time update. Drawing paths remain continuous semantic geometry, while sparse
+tiles derive one fixed periodic material. The renderer samples that material
+repeatedly and never navigates a drawing world. Brushes remain
 contour/path replay only: they must not contain generator-specific geometry or
 placement logic.
 
@@ -199,10 +199,9 @@ Rules:
 - Sources own pixels, dimensions, and monotonic `revision`.
 - Increment `revision` whenever source pixels change.
 - `getFrame()` is non-destructive.
-- `world` is optional metadata for unbounded sources: `{ origin, extent, scale,
-  wrap }`, where `origin` and `extent` describe the prepared world region,
-  `scale` is the source-world scale used by mapping, and `wrap` declares source
-  sampling semantics. Bounded bitmap sources omit it.
+- `world` is optional metadata for sources with explicit material coordinates:
+  `{ origin, extent, scale, wrap }`. Drawing uses fixed material bounds with
+  `wrap: "repeat"`; `scale` is the source-world scale used by mapping.
 - `Renderer` owns GPU upload state (`uploadedSource` / `uploadedRevision`).
 - Upload again when source identity changes, even if revision numbers match.
 - Never add source-type branches to `Renderer`.
@@ -375,8 +374,7 @@ For generators and texture brushes also verify:
   generated recipe and style
 - an animated generator changes with timeline time, while static drawing does
   not cause a source rerasterization on timeline ticks
-- distant sparse tiles and prepared atlases do not replay artwork outside its
-  actual world bounds during linear drift
+- source motion does not relocate or rebuild the fixed periodic material
 - texture selection survives async asset loading and causes a replay when its
   mask becomes available
 - Guilloché animation keeps closed contours at its frequency-transition seam
@@ -394,8 +392,8 @@ add a failing regression at the highest practical boundary, then run the
 relevant unit tests and browser smoke.
 
 For performance-sensitive drawing changes, preserve these checks: static append
-and preview updates do not replay historical committed artwork; safe-region view
-movement does not reconstruct the committed atlas; static prepared geometry is
+and preview updates do not replay historical committed artwork; source motion
+does not reconstruct the committed material; static prepared geometry is
 not re-derived for bounds and rasterization. The target animation contract is
 that static drawables are neither derived nor rasterized on a time tick.
 

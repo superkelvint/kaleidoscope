@@ -35,15 +35,18 @@ test("commits immutable drawables, keeps previews out of history, and exposes so
   assert.deepEqual(source.getDrawable(id), drawable());
   assert.equal(source.preview, null);
   assert.deepEqual(Object.keys(source.getContentState()).sort(), ["backgroundColor", "operations", "version"]);
+  assert.deepEqual(source.getFrame().world, { origin: { x: 0, y: 0 }, extent: { width: 100, height: 100 }, scale: { width: 100, height: 100 }, wrap: "repeat" });
 }));
 
 test("clear destructively resets drawing history and persisted content", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
+  const bounds = source.materialBounds;
   const fiber = { ...drawable(), points: Array.from({ length: 512 }, (_, index) => ({ x: index, y: index % 80 })), style: { ...drawable().style, brush: "fiber", version: 2, fibers: 6, gravity: 42, branching: 13, curl: 12, spread: .5, wispiness: .5, assistLevel: .6 } };
   source.commitDrawable(fiber);
   source.clear();
   assert.equal(source.canUndo(), false);
   assert.deepEqual(source.getContentState().operations, []);
+  assert.deepEqual(source.materialBounds, bounds, "clear never changes the repeat period");
 }));
 
 test("a static append paints only the new operation into an existing cached tile", () => withSource(() => {
@@ -71,19 +74,15 @@ test("a Fiber append does not replay prior Fibers in a cached tile", () => withS
   assert.deepEqual(rasterized, [next], "commit 31 rasterizes only Fiber 31");
 }));
 
-test("static append keeps uncached intersecting tiles lazy", () => withSource(() => {
+test("periodic material keeps cache tiles inside its fixed domain", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
-  const crossing = { ...drawable(), points: [{ x: 900, y: 20 }, { x: 1200, y: 20 }] };
+  const crossing = { ...drawable(), points: [{ x: 90, y: 20 }, { x: 110, y: 20 }] };
   source.tile(0, 0);
   assert.equal(source.tiles.has("1,0"), false);
   source.commitDrawable(crossing);
   assert.equal(source.tiles.has("0,0"), true);
-  assert.equal(source.tiles.has("1,0"), false, "append does not allocate unseen tiles");
-  const rebuilt = [];
-  const paint = source.paintCachedOperation.bind(source);
-  source.paintCachedOperation = (operation, ...args) => { rebuilt.push(operation); return paint(operation, ...args); };
-  source.tile(1, 0);
-  assert.deepEqual(rebuilt.map(operation => operation.drawable), [crossing], "the requested tile reconstructs from semantic history");
+  assert.equal(source.tiles.has("1,0"), false, "a periodic append does not allocate a second-world tile");
+  assert.ok(source.tile(0, 0).ctx.calls.some(([name, x]) => name === "translate" && x === -100), "the seam continuation is painted as a translated material copy");
 }));
 
 test("an uncached distant tile skips Fiber outside its actual world bounds", () => withSource(() => {
@@ -95,11 +94,11 @@ test("an uncached distant tile skips Fiber outside its actual world bounds", () 
   assert.deepEqual(painted, [], "a continuous world does not replay a Fiber into unrelated distant tiles");
 }));
 
-test("a high-zoom static append preserves the prepared atlas without historical replay", () => withSource(() => {
+test("a high-zoom static append preserves the material cache without historical replay", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
   const a = fiberDrawable(), b = fiberDrawable(20);
   source.commitDrawable(a);
-  source.prepareView({ worldBounds: { left: 0, top: 0, right: 50, bottom: 50 }, pixelWidth: 200, pixelHeight: 200 });
+  source.prepareView({ pixelDensity: 2 });
   const painted = [], paint = source.paintDrawable.bind(source);
   source.paintDrawable = (next, ...args) => { painted.push(next); return paint(next, ...args); };
   source.commitDrawable(b);
@@ -107,53 +106,48 @@ test("a high-zoom static append preserves the prepared atlas without historical 
   assert.equal(source.committedDirty, false);
 }));
 
-test("a magnified atlas replays committed paths at view resolution instead of enlarging tile pixels", () => withSource(() => {
+test("a magnified material replays committed paths at material resolution instead of enlarging tile pixels", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
   source.commitDrawable(drawable());
   source.committedCtx.calls.length = 0;
-  source.prepareView({ worldBounds: { left: 0, top: 0, right: 50, bottom: 50 }, pixelWidth: 200, pixelHeight: 200 });
-  assert.ok(source.committedCtx.calls.some(([name]) => name === "stroke"), "committed path is rerasterized into the magnified atlas");
+  source.prepareView({ pixelDensity: 2 });
+  assert.ok(source.committedCtx.calls.some(([name]) => name === "stroke"), "committed path is rerasterized into the magnified material");
   assert.equal(source.committedCtx.calls.some(([name]) => name === "drawImage"), false, "the low-resolution tile is not enlarged");
 }));
 
-test("prepared atlas hysteresis avoids composition during linear drift, then recenters once", () => withSource(() => {
+test("material bounds are stable through arbitrary source-motion requests", () => withSource(() => {
   const source = new DrawingSource({ width: 512, height: 512 });
-  const request = left => ({ worldBounds: { left, top: 0, right: left + 512, bottom: 512 }, pixelWidth: 512, pixelHeight: 512 });
-  assert.equal(source.prepareView(request(0)), true, "the first view creates a padded atlas");
-  const revision = source.revision, origin = { ...source.atlasOrigin }, extent = { ...source.atlasExtent };
+  const bounds = source.materialBounds, revision = source.revision;
   let committedCompositions = 0, tileRebuilds = 0;
-  const composeCommittedAtlas = source.composeCommittedAtlas.bind(source), rebuildTile = source.rebuildTile.bind(source);
-  source.composeCommittedAtlas = (...args) => { committedCompositions += 1; return composeCommittedAtlas(...args); };
+  const composeCommittedMaterial = source.composeCommittedMaterial.bind(source), rebuildTile = source.rebuildTile.bind(source);
+  source.composeCommittedMaterial = (...args) => { committedCompositions += 1; return composeCommittedMaterial(...args); };
   source.rebuildTile = (...args) => { tileRebuilds += 1; return rebuildTile(...args); };
-  for (let index = 1; index <= 300; index += 1) assert.equal(source.prepareView(request(index / 10)), false, "a request inside the central safe region retains the prepared atlas");
+  for (let index = 1; index <= 300; index += 1) assert.equal(source.prepareView({ pixelDensity: 1 }), false, "pure motion has no material request that can recenter storage");
   assert.equal(source.revision, revision);
-  assert.deepEqual(source.atlasOrigin, origin);
-  assert.deepEqual(source.atlasExtent, extent);
+  assert.deepEqual(source.materialBounds, bounds);
   assert.equal(committedCompositions, 0);
   assert.equal(tileRebuilds, 0);
-  assert.equal(source.prepareView(request(60)), true, "leaving the safe region recenters the atlas");
-  assert.equal(source.revision, revision + 1);
-  assert.deepEqual(source.atlasExtent, { width: 1024, height: 1024 });
-  assert.deepEqual(source.atlasOrigin, { x: -196, y: -256 }, "the prepared atlas is centered around the requested view");
-  assert.equal(committedCompositions, 1);
-  assert.equal(source.prepareView(request(60)), false, "the same request is served from the new safe region");
+  assert.equal(source.materialRebuildCount, 0);
 }));
 
-test("prepared atlas rebuilds when requested resolution changes after reaching the pixel cap", () => withSource(() => {
+test("material resolution is quantized and capped without changing its repeat domain", () => withSource(() => {
   const source = new DrawingSource({ width: 512, height: 512 });
-  const bounds = { left: 0, top: 0, right: 512, bottom: 512 };
-  assert.equal(source.prepareView({ worldBounds: bounds, pixelWidth: 3000, pixelHeight: 3000 }), true);
+  const bounds = source.materialBounds;
+  assert.equal(source.prepareView({ pixelDensity: 8 }), true);
   const revision = source.revision;
-  assert.equal(source.canvas.width, 4096, "the prepared canvas is capped independently per axis");
-  assert.equal(source.prepareView({ worldBounds: bounds, pixelWidth: 3001, pixelHeight: 3000 }), true, "a renderer-resolution change still refreshes the atlas at the cap");
-  assert.equal(source.revision, revision + 1);
+  assert.equal(source.canvas.width, 4096, "the material raster is capped independently per axis");
+  assert.equal(source.prepareView({ pixelDensity: 9 }), false, "requests above the cap do not churn the raster cache");
+  assert.equal(source.revision, revision);
+  assert.deepEqual(source.materialBounds, bounds);
 }));
 
 test("single Undo removes only the latest operation and restored artwork has no Undo", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
+  const bounds = source.materialBounds;
   source.commitDrawable(drawable()); source.commitDrawable({ ...drawable(), points: [{ x: 30, y: 30 }, { x: 40, y: 40 }] });
   assert.equal(source.canUndo(), true);
   source.undo(); assert.equal(source.canUndo(), false);
+  assert.deepEqual(source.materialBounds, bounds, "Undo never changes the repeat period");
   source.commitDrawable(drawable()); assert.equal(source.canUndo(), true);
   const state = source.getContentState();
   const restored = new DrawingSource({ width: 100, height: 100 });
@@ -215,13 +209,13 @@ test("a fixed-view live Fiber preview never replays committed artwork", () => wi
   const run = committedCount => {
     const source = new DrawingSource({ width: 512, height: 512 });
     for (let index = 0; index < committedCount; index += 1) source.commitDrawable(fiberDrawable((index % 20) * 12));
-    source.prepareView({ worldBounds: { left: 0, top: 0, right: 512, bottom: 512 }, pixelWidth: 512, pixelHeight: 512 });
-    assert.equal(source.prepareView({ worldBounds: { left: 0, top: 0, right: 512, bottom: 512 }, pixelWidth: 512, pixelHeight: 512 }), false, "the paused renderer view is unchanged");
+    source.prepareView({ pixelDensity: 1 });
+    assert.equal(source.prepareView({ pixelDensity: 1 }), false, "the paused renderer material density is unchanged");
     source.ctx.calls.length = 0;
     let committedCompositions = 0, tileRebuilds = 0, cachedReplays = 0;
     const painted = [];
-    const composeCommittedAtlas = source.composeCommittedAtlas.bind(source), rebuildTile = source.rebuildTile.bind(source), paintCachedOperation = source.paintCachedOperation.bind(source), paintDrawable = source.paintDrawable.bind(source);
-    source.composeCommittedAtlas = (...args) => { committedCompositions += 1; return composeCommittedAtlas(...args); };
+    const composeCommittedMaterial = source.composeCommittedMaterial.bind(source), rebuildTile = source.rebuildTile.bind(source), paintCachedOperation = source.paintCachedOperation.bind(source), paintDrawable = source.paintDrawable.bind(source);
+    source.composeCommittedMaterial = (...args) => { committedCompositions += 1; return composeCommittedMaterial(...args); };
     source.rebuildTile = (...args) => { tileRebuilds += 1; return rebuildTile(...args); };
     source.paintCachedOperation = (...args) => { cachedReplays += 1; return paintCachedOperation(...args); };
     source.paintDrawable = (next, ...args) => { painted.push(next); return paintDrawable(next, ...args); };
@@ -237,14 +231,14 @@ test("a fixed-view live Fiber preview never replays committed artwork", () => wi
   assert.equal(run(32), 1, "committed history count does not add preview compositing blits");
 }));
 
-test("a playback-like view-bounds change is distinct from the fixed-view Fiber preview invariant", () => withSource(() => {
+test("source motion requests do not rebuild a fixed periodic Fiber material", () => withSource(() => {
   const source = new DrawingSource({ width: 512, height: 512 });
   for (let index = 0; index < 8; index += 1) source.commitDrawable(fiberDrawable(index * 14));
   let committedCompositions = 0;
-  const composeCommittedAtlas = source.composeCommittedAtlas.bind(source);
-  source.composeCommittedAtlas = (...args) => { committedCompositions += 1; return composeCommittedAtlas(...args); };
-  assert.equal(source.prepareView({ worldBounds: { left: -128, top: -128, right: 640, bottom: 640 }, pixelWidth: 512, pixelHeight: 512 }), true);
-  assert.ok(committedCompositions > 0, "a changed renderer view is allowed to regenerate the committed atlas");
+  const composeCommittedMaterial = source.composeCommittedMaterial.bind(source);
+  source.composeCommittedMaterial = (...args) => { committedCompositions += 1; return composeCommittedMaterial(...args); };
+  assert.equal(source.prepareView({ pixelDensity: 1 }), false);
+  assert.equal(committedCompositions, 0, "source position is not an input to material reconstruction");
 }));
 
 test("committed animation composes only the dynamic history tail", () => withSource(() => {

@@ -6,8 +6,7 @@ import { DrawingDocument } from "./drawing-document.js";
 
 const TILE_SIZE = 1024;
 const ANTIALIAS_PADDING = 2;
-const PREPARED_ATLAS_SCALE = 2;
-const PREPARED_SAFE_FRACTION = .6;
+const MAX_MATERIAL_PIXELS = 4096;
 function createPaintCanvas(width, height) {
   if (typeof OffscreenCanvas !== "undefined") return new OffscreenCanvas(width, height);
   const canvas = document.createElement("canvas"); canvas.width = width; canvas.height = height; return canvas;
@@ -40,19 +39,31 @@ function boundsForPath(path, style) {
 class RenderIndex {
   constructor() { this.operations = new Map(); this.tiles = new Map(); }
   clear() { this.operations.clear(); this.tiles.clear(); }
-  add(operation, bounds) {
+  add(operation, bounds, materialBounds) {
     if (!operation?.id || !bounds) return;
     this.operations.set(operation.id, operation);
-    for (let y = floorTile(bounds.top); y <= floorTile(bounds.bottom); y += 1) for (let x = floorTile(bounds.left); x <= floorTile(bounds.right); x += 1) {
-      const key = tileKey(x, y); if (!this.tiles.has(key)) this.tiles.set(key, new Set()); this.tiles.get(key).add(operation.id);
+    for (const translation of periodicTranslations(bounds, materialBounds, materialBounds)) {
+      const shifted = { left: bounds.left + translation.x, top: bounds.top + translation.y, right: bounds.right + translation.x, bottom: bounds.bottom + translation.y };
+      for (let y = floorTile(shifted.top); y <= floorTile(shifted.bottom); y += 1) for (let x = floorTile(shifted.left); x <= floorTile(shifted.right); x += 1) {
+        const key = tileKey(x, y); if (!this.tiles.has(key)) this.tiles.set(key, new Set()); this.tiles.get(key).add(operation.id);
+      }
     }
   }
   forTile(x, y) { return [...(this.tiles.get(tileKey(x, y)) || [])].map(id => this.operations.get(id)).filter(Boolean); }
 }
-/** Derived Canvas2D state only: tiles, atlas, previews, and raster revisions. */
+function periodicTranslations(bounds, material, target) {
+  if (!bounds || !material || !target) return [];
+  const minX = Math.ceil((target.left - bounds.right) / material.width);
+  const maxX = Math.floor((target.left + target.width - bounds.left) / material.width);
+  const minY = Math.ceil((target.top - bounds.bottom) / material.height);
+  const maxY = Math.floor((target.top + target.height - bounds.top) / material.height);
+  const translations = [];
+  for (let y = minY; y <= maxY; y += 1) for (let x = minX; x <= maxX; x += 1) translations.push({ x: x * material.width, y: y * material.height });
+  return translations;
+}
+/** Derived Canvas2D state only: tiles, finite material, previews, and raster revisions. */
 export class DrawingRasterizer {
   constructor({ width = 2048, height = 2048, onFrameChange = () => {} } = {}) {
-    // width/height are the world scale used by the renderer mapping, not bounds.
     this.width = Math.max(1, Math.floor(width)); this.height = Math.max(1, Math.floor(height));
     this.canvas = createPaintCanvas(this.width, this.height); this.ctx = this.canvas.getContext("2d");
     this.committedCanvas = createPaintCanvas(this.width, this.height); this.committedCtx = this.committedCanvas.getContext("2d"); this.committedDirty = true;
@@ -60,10 +71,8 @@ export class DrawingRasterizer {
     // paint surfaces; tiles remain the actual cache.
     this.baseCanvas = createPaintCanvas(this.width, this.height); this.baseCtx = this.baseCanvas.getContext("2d");
     this.baseStaticCanvas = createPaintCanvas(this.width, this.height); this.baseStaticCtx = this.baseStaticCanvas.getContext("2d");
-    this.atlasOrigin = { x: 0, y: 0 }; this.atlasExtent = { width: this.width, height: this.height };
-    // The renderer's most recent request is diagnostic state. The frame still
-    // exposes the larger prepared atlas via atlasOrigin/atlasExtent.
-    this.requestedWorldBounds = null; this.requestedPixelSize = null; this.atlasRecenterCount = 0;
+    this.materialBounds = { left: 0, top: 0, width: this.width, height: this.height };
+    this.materialScale = 1; this.requestedPixelDensity = 1; this.materialRebuildCount = 0;
     this.tiles = new Map(); this.operations = []; this.preview = null;
     this.backgroundColor = "#000000"; this.time = 0; this.revision = 0; this.onFrameChange = onFrameChange;
     this.pendingTextureReplays = new Set();
@@ -73,22 +82,21 @@ export class DrawingRasterizer {
     this.renderIndex = new RenderIndex();
     // Kept as compatibility/introspection fields; static tile replay is now lazy.
     this.staticPrefixEnd = 0; this.staticCheckpoints = [];
-    this.composeAtlas();
+    this.composeMaterial();
   }
 
   getWorldScale() { return { width: this.width, height: this.height }; }
-  getFrame() { return { pixels: this.canvas, width: this.canvas.width, height: this.canvas.height, revision: this.revision, world: { origin: this.atlasOrigin, extent: this.atlasExtent, scale: { width: this.width, height: this.height }, wrap: "clamp" } }; }
+  getFrame() { return { pixels: this.canvas, width: this.canvas.width, height: this.canvas.height, revision: this.revision, world: { origin: { x: this.materialBounds.left, y: this.materialBounds.top }, extent: { width: this.materialBounds.width, height: this.materialBounds.height }, scale: { width: this.width, height: this.height }, wrap: "repeat" } }; }
   isDrawable(drawable) { return isDrawable(drawable) && Boolean(BRUSHES[drawable?.style?.brush]) && (drawable.kind !== "pathStroke" || canReplayBrushPath(drawable.points, drawable.style)); }
   markFrameChanged() { this.revision += 1; this.onFrameChange(); }
   perfMetadata(extra = {}) {
     return {
       committedOperationCount: this.operations.length,
       activePreviewPointCount: this.preview?.points?.length || 0,
-      atlasBounds: { left: this.atlasOrigin.x, top: this.atlasOrigin.y, width: this.atlasExtent.width, height: this.atlasExtent.height },
-      atlasPixels: { width: this.canvas.width, height: this.canvas.height },
-      requestedBounds: this.requestedWorldBounds ? { ...this.requestedWorldBounds } : null,
-      requestedPixels: this.requestedPixelSize ? { ...this.requestedPixelSize } : null,
-      atlasRecenterCount: this.atlasRecenterCount,
+      materialBounds: { ...this.materialBounds },
+      materialPixels: { width: this.canvas.width, height: this.canvas.height },
+      requestedPixelDensity: this.requestedPixelDensity,
+      materialRebuildCount: this.materialRebuildCount,
       committedDirty: this.committedDirty,
       ...extra
     };
@@ -120,7 +128,7 @@ export class DrawingRasterizer {
 
   appendOperation(operation) {
     this.operations.push(operation);
-    this.renderIndex.add(operation, this.boundsForOperation(operation));
+    this.renderIndex.add(operation, this.boundsForOperation(operation), this.materialBounds);
     const timeDependent = drawableDependsOnTime(operation.drawable);
     if (timeDependent) this.invalidateOperation(operation.drawable);
     else this.appendStaticOperationToCachedTiles(operation);
@@ -134,7 +142,7 @@ export class DrawingRasterizer {
     }
   }
   rebuildBase() { this.tiles.clear(); this.staticPrefixEnd = this.operations.findIndex(op => drawableDependsOnTime(op.drawable)); if (this.staticPrefixEnd < 0) this.staticPrefixEnd = this.operations.length; this.rebuildRenderIndex(); }
-  rebuildRenderIndex() { this.renderIndex.clear(); for (let index = 0; index < this.operations.length; index += 1) this.renderIndex.add(this.operations[index], this.boundsForOperation(this.operations[index])); }
+  rebuildRenderIndex() { this.renderIndex.clear(); for (let index = 0; index < this.operations.length; index += 1) this.renderIndex.add(this.operations[index], this.boundsForOperation(this.operations[index]), this.materialBounds); }
   invalidateCommittedView() { this.committedDirty = true; }
   appendStaticOperationToCachedTiles(operation) {
     for (const tile of this.tiles.values()) {
@@ -145,10 +153,9 @@ export class DrawingRasterizer {
     }
   }
   appendStaticOperationToCommittedView(operation) {
-    const { width, height } = this.atlasExtent;
-    const sx = this.canvas.width / width, sy = this.canvas.height / height;
+    const sx = this.canvas.width / this.materialBounds.width, sy = this.canvas.height / this.materialBounds.height;
     if (this.committedDirty || !(sx > 1.001 || sy > 1.001)) return false;
-    this.paintOperation(operation, this.committedCtx, { transform: { x: -this.atlasOrigin.x, y: -this.atlasOrigin.y, sx, sy } });
+    this.paintOperation(operation, this.committedCtx, { periodic: true, transform: { x: -this.materialBounds.left, y: -this.materialBounds.top, sx, sy } });
     count("Drawing magnified committed append", () => this.perfMetadata({ operationIndex: this.operations.length - 1 }));
     return true;
   }
@@ -174,7 +181,7 @@ export class DrawingRasterizer {
     if (operation?.type === "clear") return true;
     const bounds = this.boundsForOperation(operation);
     if (!bounds) return false;
-    return bounds.right >= tile.x && bounds.left <= tile.x + tile.width && bounds.bottom >= tile.y && bounds.top <= tile.y + tile.height;
+    return periodicTranslations(bounds, this.materialBounds, { left: tile.x, top: tile.y, width: tile.width, height: tile.height }).length > 0;
   }
   tile(x, y) {
     count("Drawing tile lookup", () => this.perfMetadata({ tile: { x, y }, hit: this.tiles.has(tileKey(x, y)) }));
@@ -192,89 +199,82 @@ export class DrawingRasterizer {
       }
     }, () => this.perfMetadata({ tile: { x, y }, replayedOperations: this.operations.length }));
   }
-  prepareView({ worldBounds, pixelWidth, pixelHeight } = {}) {
-    if (!worldBounds) {
-      const metadata = this.perfMetadata({ changed: false, reason: "missing-bounds" });
-      count("Drawing prepare view", metadata); return measure("Drawing prepare view unchanged", () => false, metadata);
-    }
-    const left = Math.floor(worldBounds.left), top = Math.floor(worldBounds.top), right = Math.ceil(worldBounds.right), bottom = Math.ceil(worldBounds.bottom);
-    if (!(right > left && bottom > top)) {
-      const metadata = this.perfMetadata({ changed: false, reason: "empty-bounds" });
-      count("Drawing prepare view", metadata); return measure("Drawing prepare view unchanged", () => false, metadata);
-    }
-    const requestedBounds = { left, top, width: right - left, height: bottom - top };
-    const requestedPixels = { width: Math.max(1, Math.floor(pixelWidth || this.width)), height: Math.max(1, Math.floor(pixelHeight || this.height)) };
-    const previousRequestedPixels = this.requestedPixelSize;
-    this.requestedWorldBounds = requestedBounds; this.requestedPixelSize = requestedPixels;
-    const safeWidth = this.atlasExtent.width * PREPARED_SAFE_FRACTION, safeHeight = this.atlasExtent.height * PREPARED_SAFE_FRACTION;
-    const safeLeft = this.atlasOrigin.x + (this.atlasExtent.width - safeWidth) / 2, safeTop = this.atlasOrigin.y + (this.atlasExtent.height - safeHeight) / 2;
-    const insideSafeRegion = left >= safeLeft && top >= safeTop && right <= safeLeft + safeWidth && bottom <= safeTop + safeHeight;
-    const atlasPixelWidth = Math.min(4096, requestedPixels.width * PREPARED_ATLAS_SCALE), atlasPixelHeight = Math.min(4096, requestedPixels.height * PREPARED_ATLAS_SCALE);
-    const outputResolutionChanged = !previousRequestedPixels || previousRequestedPixels.width !== requestedPixels.width || previousRequestedPixels.height !== requestedPixels.height;
-    const changed = outputResolutionChanged || !insideSafeRegion;
-    const reason = outputResolutionChanged ? "resolution" : insideSafeRegion ? "safe-region" : "outside-safe-region";
-    count("Drawing prepare view", () => this.perfMetadata({ changed, reason }));
-    if (!changed) return measure("Drawing prepare view unchanged", () => false, this.perfMetadata({ changed: false, reason }));
-    return measure("Drawing prepare view change", () => {
-      const atlasWidth = requestedBounds.width * PREPARED_ATLAS_SCALE, atlasHeight = requestedBounds.height * PREPARED_ATLAS_SCALE;
-      this.atlasOrigin = { x: left - (atlasWidth - requestedBounds.width) / 2, y: top - (atlasHeight - requestedBounds.height) / 2 };
-      this.atlasExtent = { width: atlasWidth, height: atlasHeight };
-      if (this.canvas.width !== atlasPixelWidth) this.canvas.width = atlasPixelWidth; if (this.canvas.height !== atlasPixelHeight) this.canvas.height = atlasPixelHeight;
-      if (this.committedCanvas.width !== atlasPixelWidth) this.committedCanvas.width = atlasPixelWidth; if (this.committedCanvas.height !== atlasPixelHeight) this.committedCanvas.height = atlasPixelHeight;
-      this.ctx = this.canvas.getContext("2d"); this.committedCtx = this.committedCanvas.getContext("2d"); this.invalidateCommittedView(); this.atlasRecenterCount += 1; this.composeAtlas(); this.markFrameChanged(); return true;
-    }, () => this.perfMetadata({ changed: true, reason }));
+  prepareView({ pixelDensity } = {}) {
+    const requested = Math.max(1, Number(pixelDensity) || 1);
+    const maxScale = Math.max(1, Math.min(MAX_MATERIAL_PIXELS / this.materialBounds.width, MAX_MATERIAL_PIXELS / this.materialBounds.height));
+    let nextScale = this.materialScale;
+    if (requested > this.materialScale * 1.25) nextScale = Math.min(maxScale, 2 ** Math.ceil(Math.log2(requested)));
+    else if (requested < this.materialScale / 2.5) nextScale = Math.max(1, 2 ** Math.floor(Math.log2(requested)));
+    this.requestedPixelDensity = requested;
+    const changed = Math.abs(nextScale - this.materialScale) > .001;
+    const metadata = this.perfMetadata({ changed, reason: changed ? "material-resolution" : "material-resolution-hysteresis" });
+    count("Drawing prepare material", metadata);
+    if (!changed) return measure("Drawing prepare material unchanged", () => false, metadata);
+    return measure("Drawing prepare material change", () => {
+      this.materialScale = nextScale;
+      const pixelWidth = Math.max(1, Math.min(MAX_MATERIAL_PIXELS, Math.round(this.materialBounds.width * nextScale)));
+      const pixelHeight = Math.max(1, Math.min(MAX_MATERIAL_PIXELS, Math.round(this.materialBounds.height * nextScale)));
+      this.canvas.width = pixelWidth; this.canvas.height = pixelHeight;
+      this.committedCanvas.width = pixelWidth; this.committedCanvas.height = pixelHeight;
+      this.ctx = this.canvas.getContext("2d"); this.committedCtx = this.committedCanvas.getContext("2d");
+      this.invalidateCommittedView(); this.materialRebuildCount += 1; this.composeMaterial(); this.markFrameChanged(); return true;
+    }, () => this.perfMetadata({ changed: true, reason: "material-resolution" }));
   }
-  composeCommittedAtlas() {
-    const { x, y } = this.atlasOrigin, { width, height } = this.atlasExtent;
+  composeCommittedMaterial() {
     const context = this.committedCtx;
     const metadata = this.perfMetadata();
-    return measure("Drawing committed atlas composition", () => {
+    return measure("Drawing committed material composition", () => {
     context.clearRect(0, 0, this.committedCanvas.width, this.committedCanvas.height);
     context.save(); context.globalAlpha = 1; context.fillStyle = this.backgroundColor; context.fillRect(0, 0, this.committedCanvas.width, this.committedCanvas.height);
-    const sx = this.canvas.width / width, sy = this.canvas.height / height;
+    const sx = this.canvas.width / this.materialBounds.width, sy = this.canvas.height / this.materialBounds.height;
     // Tiles are a one-pixel-per-world-unit cache. Enlarging one after a zoom
     // makes a committed stroke softer than its live vector preview. At a
-    // magnification, replay the durable paths into the view atlas at its
+    // magnification, replay the durable paths into the material at its
     // actual pixel density instead; the regular tile cache remains the fast
     // path when it is sampled at native resolution or smaller.
     if (sx > 1.001 || sy > 1.001) {
       for (let index = 0; index < this.operations.length; index += 1) {
         const operation = this.operations[index];
-        if (operation?.drawable) this.paintOperation(operation, context, { transform: { x: -x, y: -y, sx, sy } });
+        if (operation?.drawable) this.paintOperation(operation, context, { periodic: true, transform: { x: -this.materialBounds.left, y: -this.materialBounds.top, sx, sy } });
       }
-    } else for (let ty = floorTile(y); ty <= floorTile(y + height); ty += 1) for (let tx = floorTile(x); tx <= floorTile(x + width); tx += 1) {
-      const tile = this.tile(tx, ty); context.drawImage(tile.canvas, (tx * TILE_SIZE - x) * sx, (ty * TILE_SIZE - y) * sy, TILE_SIZE * sx, TILE_SIZE * sy);
+    } else for (let ty = floorTile(this.materialBounds.top); ty <= floorTile(this.materialBounds.top + this.materialBounds.height - 1); ty += 1) for (let tx = floorTile(this.materialBounds.left); tx <= floorTile(this.materialBounds.left + this.materialBounds.width - 1); tx += 1) {
+      const tile = this.tile(tx, ty); context.drawImage(tile.canvas, (tx * TILE_SIZE - this.materialBounds.left) * sx, (ty * TILE_SIZE - this.materialBounds.top) * sy, TILE_SIZE * sx, TILE_SIZE * sy);
     }
     context.restore(); this.committedDirty = false;
     }, metadata);
   }
-  composeAtlas() {
+  composeMaterial() {
     const metadata = this.perfMetadata();
-    return measure("Drawing atlas composition", () => {
-      if (this.committedDirty) this.composeCommittedAtlas();
-      const { x, y } = this.atlasOrigin, { width, height } = this.atlasExtent;
-      const sx = this.canvas.width / width, sy = this.canvas.height / height;
+    return measure("Drawing material composition", () => {
+      if (this.committedDirty) this.composeCommittedMaterial();
+      const sx = this.canvas.width / this.materialBounds.width, sy = this.canvas.height / this.materialBounds.height;
       this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height); this.ctx.save(); this.ctx.globalAlpha = 1;
       count("Drawing committed canvas drawImage", () => this.perfMetadata());
       this.ctx.drawImage(this.committedCanvas, 0, 0);
-      if (this.preview) this.paintDrawable(this.preview, this.ctx, { preview: true, transform: { x: -x, y: -y, sx, sy } });
+      if (this.preview) this.paintDrawable(this.preview, this.ctx, { preview: true, periodic: true, transform: { x: -this.materialBounds.left, y: -this.materialBounds.top, sx, sy } });
       this.ctx.restore();
     }, metadata);
   }
-  rerender() { return measure("Drawing rerender", () => { this.composeAtlas(); this.markFrameChanged(); }, () => this.perfMetadata()); }
+  rerender() { return measure("Drawing rerender", () => { this.composeMaterial(); this.markFrameChanged(); }, () => this.perfMetadata()); }
   paintOperation(operation, context, options = {}) { return this.paintDrawable(operation.drawable, context, { ...options, prepared: this.prepareOperation(operation) }); }
   paintCachedOperation(operation, context, tile) {
     if (operation.type === "clear") { context.clearRect(0, 0, tile?.width || this.canvas.width, tile?.height || this.canvas.height); return; }
-    this.paintOperation(operation, context, { tile });
+    this.paintOperation(operation, context, { tile, periodic: true });
   }
-  paintDrawable(drawable, context = this.ctx, { preview = false, tile = null, transform = null, prepared = null } = {}) {
+  paintDrawable(drawable, context = this.ctx, { preview = false, tile = null, transform = null, prepared = null, periodic = false } = {}) {
     const path = prepared?.path || derivePath(drawable, { width: this.width, height: this.height, time: this.time }); if (!path.contours.length) return;
     if (["fiber", "hair"].includes(drawable.style.brush)) count("Drawing Fiber rasterization", () => this.perfMetadata({ preview, tile: tile ? { x: tile.x, y: tile.y } : null }));
     if (drawable.style.brush === "texture" && !brushTextureCatalog.get(drawable.style.textureId)) { this.requestTextureReplay(drawable.style.textureId); return; }
     context.save();
     if (tile) { context.beginPath?.(); context.rect?.(0, 0, tile.width, tile.height); context.clip?.(); context.translate(-tile.x, -tile.y); }
     if (transform) { context.translate(transform.x * transform.sx, transform.y * transform.sy); context.scale?.(transform.sx, transform.sy); }
-    this.replayContours(context, path.contours, drawable.style, { x: 0, y: 0 }, preview);
+    const target = tile
+      ? { left: tile.x, top: tile.y, width: tile.width, height: tile.height }
+      : this.materialBounds;
+    const translations = periodic
+      ? periodicTranslations(boundsForPath(path, drawable.style), this.materialBounds, target)
+      : [{ x: 0, y: 0 }];
+    for (const translation of translations) this.replayContours(context, path.contours, drawable.style, translation, preview);
     context.restore();
   }
   replayContours(context, contours, style, translation = { x: 0, y: 0 }, preview = false) { context.save(); context.translate(translation.x, translation.y); measure("Canvas brush replay", () => replayBrushContours(context, contours, preview ? { ...style, preview: true } : style), () => this.perfMetadata({ preview, contourCount: contours.length })); context.restore(); }
@@ -297,8 +297,8 @@ export class DrawingSource {
   get canvas() { return this.rasterizer.canvas; }
   get committedCtx() { return this.rasterizer.committedCtx; }
   get committedDirty() { return this.rasterizer.committedDirty; }
-  get atlasOrigin() { return this.rasterizer.atlasOrigin; }
-  get atlasExtent() { return this.rasterizer.atlasExtent; }
+  get materialBounds() { return { ...this.rasterizer.materialBounds }; }
+  get materialRebuildCount() { return this.rasterizer.materialRebuildCount; }
   get staticPrefixEnd() { return this.rasterizer.staticPrefixEnd; }
   get staticCheckpoints() { return this.rasterizer.staticCheckpoints; }
   get baseCtx() { return this.rasterizer.baseCtx; }
@@ -314,8 +314,8 @@ export class DrawingSource {
   set rebuildTile(value) { this.rasterizer.rebuildTile = value; }
   get rebuildBase() { return this.rasterizer.rebuildBase.bind(this.rasterizer); }
   set rebuildBase(value) { this.rasterizer.rebuildBase = value; }
-  get composeCommittedAtlas() { return this.rasterizer.composeCommittedAtlas.bind(this.rasterizer); }
-  set composeCommittedAtlas(value) { this.rasterizer.composeCommittedAtlas = value; }
+  get composeCommittedMaterial() { return this.rasterizer.composeCommittedMaterial.bind(this.rasterizer); }
+  set composeCommittedMaterial(value) { this.rasterizer.composeCommittedMaterial = value; }
   getWorldScale() { return this.rasterizer.getWorldScale(); }
   getFrame() { return this.rasterizer.getFrame(); }
   prepareView(request) { return this.rasterizer.prepareView(request); }

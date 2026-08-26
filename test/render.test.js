@@ -103,6 +103,19 @@ test("updates same-sized source revisions with texSubImage2D", () => {
   assert.equal(renderer.gl.textureSubUploads, 1);
 });
 
+test("pure drawing-source motion requests quality without revising or reuploading material", () => {
+  const renderer = createRenderer();
+  const frame = { pixels: {}, width: 2048, height: 2048, revision: 7, world: { origin: { x: 0, y: 0 }, extent: { width: 2048, height: 2048 }, scale: { width: 2048, height: 2048 }, wrap: "repeat" } };
+  const requests = [];
+  const source = { getFrame: () => frame, getWorldScale: () => frame.world.scale, prepareView: request => requests.push(request) };
+  renderer.setSource(source);
+  const uploads = renderer.getSourceDiagnostics();
+  renderer.updateState({ animate: true, driftMode: "linear", driftX: 10, driftY: -4, rotationDeg: 720, currentTime: 10000 }, { preview: false });
+  assert.equal(renderer.syncSourceTexture(), false);
+  assert.ok(requests.every(request => Object.keys(request).join(",") === "pixelDensity"), "renderer no longer supplies moving world bounds");
+  assert.deepEqual(renderer.getSourceDiagnostics(), uploads, "unchanged material is not reuploaded during source motion");
+});
+
 test("GPU source frames are bound directly without CPU texture uploads", () => {
   const renderer = createRenderer();
   const texture = { name: "pixi-render-texture" };
