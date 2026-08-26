@@ -21,6 +21,10 @@ const fiberDrawable = (offset = 0) => ({
   kind: "pathStroke", points: [{ x: 20, y: 50 + offset }, { x: 220, y: 50 + offset }],
   style: { ...drawable().style, brush: "fiber", version: 2, size: 8, seed: 37, fibers: .5, gravity: 42, branching: 13, curl: 12, spread: .5, wispiness: .5, assistLevel: .55 }
 });
+const wispDrawable = () => ({
+  kind: "pathStroke", points: [{ x: 20, y: 50 }, { x: 30, y: 54 }, { x: 42, y: 45 }, { x: 58, y: 60 }, { x: 75, y: 50 }],
+  style: { ...drawable().style, brush: "wisp", version: 1, size: 16, opacity: .8 }
+});
 const generatedDrawable = () => ({ kind: "generatedStroke", generator: "spirograph", generatorVersion: 2, config: { lobes: 5, penOffset: 1.2, reach: .1, rotation: 0, phase: 0, arms: 1 }, animation: { amount: .5, speed: .15, phase: 0 }, domain: { start: 0, end: Math.PI * 2 }, sampling: { mode: "parameter", step: .01 }, style: drawable().style });
 const animatedRosette = () => ({ kind: "generatedStroke", generator: "guillocheRosette", generatorVersion: 2, config: { petals: 8, secondaryFrequency: 13, primaryAmplitude: .08, secondaryAmplitude: .035, baseRadius: .2, rotation: 0, lineCount: 2, lineSpacing: .006, phaseOffset: 0 }, animation: { amount: .5, speed: .15, targets: { phaseOffset: true, secondaryAmplitude: false, secondaryFrequency: false, rotation: false } }, domain: { start: 0, end: Math.PI * 2 }, sampling: { mode: "parameter", step: .01 }, style: drawable().style });
 
@@ -72,6 +76,19 @@ test("a Fiber append does not replay prior Fibers in a cached tile", () => withS
   const next = fiberDrawable(140);
   source.commitDrawable(next);
   assert.deepEqual(rasterized, [next], "commit 31 rasterizes only Fiber 31");
+}));
+
+test("completed Wisp is static and its exact transient bounds reject distant sparse tiles", () => withSource(() => {
+  const source = new DrawingSource({ width: 512, height: 512 });
+  source.commitDrawable(wispDrawable());
+  const prepared = source.rasterizer.preparedDrawables.values().next().value;
+  assert.ok(prepared.bounds);
+  assert.equal(prepared.path, null, "Wisp caches bounds rather than its emitted curve history");
+  let paints = 0, paint = source.paintDrawable.bind(source);
+  source.paintDrawable = (...args) => { paints += 1; return paint(...args); };
+  assert.equal(source.setTime(1), false, "Wisp has no timeline dependency");
+  source.tile(10, 0);
+  assert.equal(paints, 0, "distant tile replay is rejected from Wisp's derived bounds");
 }));
 
 test("periodic material keeps cache tiles inside its fixed domain", () => withSource(() => {

@@ -2,17 +2,17 @@ import { BRUSHES, canReplayBrushPath } from "./brushes.js";
 import { DEFAULT_BRUSH_TEXTURE_ID } from "./brush-textures.js";
 import { interpretGesture, preprocessGesture, sampleCanonicalGesture } from "./gesture-interpreter.js";
 import { sampleCircularArc, sampleCubicBezier } from "./constructed-strokes.js";
-import { displayGeometryContext, screenToSourcePoint } from "./drawing-mapping.js";
+import { displayGeometryContext, screenToSourcePoint, sourceUnitsPerDisplayPixel } from "./drawing-mapping.js";
 
-const TAU = Math.PI * 2, CONTINUOUS = { spray: 30, texture: 12 };
+const TAU = Math.PI * 2, CONTINUOUS = { spray: 30, texture: 12, wisp: 60 };
 const TOOLS = new Set(["freehand", "smart", "arc", "bezier"]);
-export const DRAWING_BRUSHES = ["pen", "ribbon", "calligraphy", "spray", "texture", "fiber", "hair"];
+export const DRAWING_BRUSHES = ["pen", "ribbon", "calligraphy", "spray", "texture", "fiber", "hair", "wisp"];
 const clone = value => structuredClone(value);
 
 export class DrawingController {
   constructor({ source, getRendererState = () => ({}) }) {
     this.source = source; this.getRendererState = getRendererState;
-    this.settings = { tool: "freehand", brush: "pen", color: "#ffffff", colorMode: "solid", gradientStartColor: "#ffffff", gradientEndColor: "#ff4da6", size: 8, opacity: .85, lines: 5, span: 24, nibRatio: .22, density: 24, particleSize: 1.5, textureId: DEFAULT_BRUSH_TEXTURE_ID, textureSpacing: .25, textureRotationMode: "followStroke", assistLevel: .6, fibers: 6, gravity: 42, branching: 13, curl: 12, spread: .5, wispiness: .5, smoothing: .35 };
+    this.settings = { tool: "freehand", brush: "pen", color: "#ffffff", colorMode: "solid", gradientStartColor: "#ffffff", gradientEndColor: "#ff4da6", size: 8, opacity: .85, lines: 5, span: 24, nibRatio: .22, density: 24, particleSize: 1.5, textureId: DEFAULT_BRUSH_TEXTURE_ID, textureSpacing: .25, textureRotationMode: "followStroke", assistLevel: .6, fibers: 6, gravity: 42, branching: 13, curl: 12, spread: .5, wispiness: .5, wispEnergy: .5, wispMomentum: .3, wispTurbulence: 1, wispPersistence: 150, wispDensity: 5, smoothing: .35 };
     this.current = null; this.construction = null; this.timer = null; this.previewFrame = null;
   }
   getState() { return clone(this.settings); }
@@ -24,16 +24,18 @@ export class DrawingController {
       if (key === "brush" && !BRUSHES[value]) continue;
       this.settings[key] = value;
     }
+    if (this.settings.brush === "wisp") this.settings.tool = "freehand";
     return true;
   }
-  setTool(tool) { if (TOOLS.has(tool)) { this.cancel(); this.settings.tool = tool; } }
-  setBrush(brush) { if (BRUSHES[brush]) this.settings.brush = brush; }
+  setTool(tool) { if (TOOLS.has(tool)) { this.cancel(); this.settings.tool = this.settings.brush === "wisp" ? "freehand" : tool; } }
+  setBrush(brush) { if (BRUSHES[brush]) { this.settings.brush = brush; if (brush === "wisp") this.settings.tool = "freehand"; } }
   set(key, value) { if (key in this.settings) this.settings[key] = value; }
   styleSnapshot() {
     const s = this.settings, gradient = s.colorMode === "gradient";
     // Make a saved style self-consistent. This is deliberately redundant with
     // brush rendering: no solid stroke may inherit stale endpoint swatches.
-    return { brush: s.brush, version: s.brush === "fiber" || s.brush === "hair" ? 2 : undefined, color: s.color, colorMode: s.colorMode, startColor: gradient ? s.gradientStartColor : s.color, endColor: gradient ? s.gradientEndColor : s.color, size: Number(s.size), opacity: Number(s.opacity), lines: Number(s.lines), span: Number(s.span), nibRatio: Number(s.nibRatio), density: Number(s.density), particleSize: Number(s.particleSize), textureId: s.textureId, spacing: Number(s.textureSpacing), rotationMode: s.textureRotationMode, assistLevel: Number(s.assistLevel), fibers: Number(s.fibers), gravity: Number(s.gravity), branching: Number(s.branching), curl: Number(s.curl), spread: Number(s.spread), wispiness: Number(s.wispiness), taper: "none", seed: Math.floor(Math.random() * 0x100000000) };
+    const style = { brush: s.brush, version: s.brush === "fiber" || s.brush === "hair" || s.brush === "wisp" ? 2 : undefined, color: s.color, colorMode: s.colorMode, startColor: gradient ? s.gradientStartColor : s.color, endColor: gradient ? s.gradientEndColor : s.color, size: Number(s.size), opacity: Number(s.opacity), lines: Number(s.lines), span: Number(s.span), nibRatio: Number(s.nibRatio), density: Number(s.density), particleSize: Number(s.particleSize), textureId: s.textureId, spacing: Number(s.textureSpacing), rotationMode: s.textureRotationMode, assistLevel: Number(s.assistLevel), fibers: Number(s.fibers), gravity: Number(s.gravity), branching: Number(s.branching), curl: Number(s.curl), spread: Number(s.spread), wispiness: Number(s.wispiness), taper: "none", seed: Math.floor(Math.random() * 0x100000000) };
+    return s.brush === "wisp" ? { ...style, energy: Number(s.wispEnergy), momentum: Number(s.wispMomentum), turbulence: Number(s.wispTurbulence), persistence: Number(s.wispPersistence), density: Number(s.wispDensity) } : style;
   }
   point(event) { return { x: event.clientX, y: event.clientY }; }
   map(point, current) { return screenToSourcePoint(point, current.canvas, current.mapping, this.source.width, this.source.height); }
@@ -42,14 +44,28 @@ export class DrawingController {
     const mapping = { ...this.getRendererState() }, p = this.point(event);
     const current = { pointerId: event.pointerId, canvas, mapping, context: displayGeometryContext(mapping, canvas), anchor: p, last: p, smooth: p, displayPoints: [p], points: [], style: this.styleSnapshot(), heldAt: performance.now(), remainder: 0, wedge: null };
     const constrained = this.interactionPoint(event, current);
-    current.anchor = constrained; current.last = constrained; current.smooth = constrained; current.displayPoints = [constrained]; current.points = [this.map(constrained, current)];
+    current.anchor = constrained; current.last = constrained; current.smooth = constrained; current.displayPoints = [constrained]; current.wispPreviousInput = this.lastInputPoint || p; current.wispLatestInput = p;
+    // Wisp updates its input position on mouse-down, but does not
+    // create a particle until the next fixed-rate inputFrame.
+    current.points = current.style.brush === "wisp" ? [] : [this.map(constrained, current)];
+    if (current.style.brush === "wisp") {
+      current.style.wispUnitsPerPixel = sourceUnitsPerDisplayPixel(canvas, mapping, this.source.width, this.source.height);
+      const sourceCenter = this.map(current.context.center, current);
+      current.style.wispCenterX = sourceCenter.x;
+      current.style.wispCenterY = sourceCenter.y;
+    }
     this.current = current;
     this.startContinuous();
   }
   move(event) {
+    this.lastInputPoint = this.point(event);
     if (this.construction) return this.constructMove(event);
     const c = this.current; if (!c || c.pointerId !== event.pointerId) return;
     const p = this.interactionPoint(event, c);
+    // Wisp samples only on its fixed 60 Hz clock. Pointer moves merely update
+    // the next source-space sample; replaying the full simulation here would
+    // create a preview for a frame that was never durably sampled.
+    if (c.style.brush === "wisp") { c.last = p; c.wispLatestInput = this.lastInputPoint; return; }
     if (this.settings.tool === "smart") { c.displayPoints.push(p); if (c.displayPoints.length > 64) c.displayPoints = preprocessGesture(c.displayPoints, 64); this.previewSmart(c); c.last = p; return; }
     if (event.shiftKey) { c.points = [this.map(c.anchor, c), this.map(p, c)]; c.last = p; this.preview(c); return; }
     const alpha = 1 - Math.min(1, Math.max(0, Number(this.settings.smoothing) || 0)) * .88;
@@ -59,15 +75,19 @@ export class DrawingController {
   end(event) {
     if (this.construction) return this.constructUp(event);
     const c = this.current; if (!c || c.pointerId !== event.pointerId) return;
-    this.deposit(); this.flushPreview(c);
+    if (c.style.brush !== "wisp") { this.deposit(); this.flushPreview(c); }
     if (this.settings.tool === "smart") { const gesture = interpretGesture(c.displayPoints, c.context); if (gesture) c.points = sampleCanonicalGesture(gesture, this.count(gesture.points, c)).map(p => this.map(p, c)); }
+    else if (c.style.brush === "wisp") {
+      // Wisp input is sampled only by the fixed-rate clock. Mouseup completes
+      // the gesture without manufacturing an off-clock velocity impulse.
+    }
     else if (!event.shiftKey) this.capture(c.last, this.interactionPoint(event, c), c);
     const drawable = { kind: "pathStroke", points: c.points.map(clone), style: clone(c.style) };
     this.source.previewDrawable(null); if (canReplayBrushPath(drawable.points, drawable.style)) this.source.commitDrawable(drawable);
     this.stopContinuous(); this.current = null;
   }
   cancel(event) { if (event && this.current?.pointerId !== event.pointerId && this.construction?.pointerId !== event.pointerId) return false; const hadInteraction = Boolean(this.current || this.construction); if (!hadInteraction) return false; this.cancelPreviewFrame(); this.current = null; this.construction = null; this.stopContinuous(); this.source.previewDrawable(null); return true; }
-  isFiberPreview(c) { return c?.style?.brush === "fiber" || c?.style?.brush === "hair"; }
+  isFiberPreview(c) { return ["fiber", "hair", "wisp"].includes(c?.style?.brush); }
   publishPreview(c) { if (this.current !== c) return; this.source.previewDrawable({ kind: "pathStroke", points: c.points.map(clone), style: c.style }); }
   preview(c) {
     if (!this.isFiberPreview(c)) return this.publishPreview(c);
@@ -92,7 +112,7 @@ export class DrawingController {
   interactionPoint(event, current) { const point = this.point(event); if (!event.ctrlKey) { current.wedge = null; return point; } return this.snapWedge(point, current); }
   startContinuous() { const rate = CONTINUOUS[this.current?.style.brush]; if (!rate) return; this.timer = setInterval(() => this.deposit(), 1000 / 60); }
   stopContinuous() { if (this.timer) clearInterval(this.timer); this.timer = null; }
-  deposit() { const c = this.current, rate = CONTINUOUS[c?.style.brush]; if (!rate || !c?.points.length) return; const t = performance.now(), available = c.remainder + (t - c.heldAt) * rate / 1000, n = Math.floor(available); c.heldAt = t; c.remainder = available - n; if (n) { const p = c.points.at(-1); p.holdCount = (p.holdCount || 0) + n; this.preview(c); } }
+  deposit() { const c = this.current, rate = CONTINUOUS[c?.style.brush]; if (!rate || !c) return; if (c.style.brush === "wisp") { const input = c.wispLatestInput || c.last, previous = c.wispPreviousInput || input, point = this.map(c.last, c); point.inputScreenVx = input.x - previous.x; point.inputScreenVy = input.y - previous.y; c.wispPreviousInput = { ...input }; c.points.push(point); this.preview(c); return; } if (!c.points.length) return; const t = performance.now(), available = c.remainder + (t - c.heldAt) * rate / 1000, n = Math.floor(available); c.heldAt = t; c.remainder = available - n; if (n) { const p = c.points.at(-1); p.holdCount = (p.holdCount || 0) + n; this.preview(c); } }
   constructDown(event, canvas) { const p = this.point(event); if (!this.construction) { const mapping = { ...this.getRendererState() }; this.construction = { pointerId: event.pointerId, canvas, mapping, tool: this.settings.tool, anchors: { start: p }, handles: {}, stage: "end", style: this.styleSnapshot() }; return; } const c = this.construction; if (!c.anchors.end) { c.anchors.end = p; c.handles = c.tool === "arc" ? { bend: p } : { startHandle: { x: (c.anchors.start.x * 2 + p.x) / 3, y: (c.anchors.start.y * 2 + p.y) / 3 }, endHandle: { x: (c.anchors.start.x + p.x * 2) / 3, y: (c.anchors.start.y + p.y * 2) / 3 } }; c.active = Object.keys(c.handles)[0]; c.dragging = false; this.updateConstruction(c); return; } c.pointerId = event.pointerId; c.dragging = true; }
   constructMove(event) { const c = this.construction; if (!c?.dragging || c.pointerId !== event.pointerId) return; c.handles[c.active] = this.point(event); this.updateConstruction(c); }
   constructUp(event) { const c = this.construction; if (!c || c.pointerId !== event.pointerId) return; if (!c.dragging) return; c.handles[c.active] = this.point(event); const keys = Object.keys(c.handles), next = keys[keys.indexOf(c.active) + 1]; if (next) { c.active = next; c.dragging = false; c.pointerId = null; this.updateConstruction(c); return; } const drawable = this.constructDrawable(c); this.source.previewDrawable(null); if (drawable) this.source.commitDrawable(drawable); this.construction = null; }

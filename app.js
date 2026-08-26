@@ -3,6 +3,7 @@ import { BitmapSource } from "./bitmap-source.js";
 import { DrawingSource } from "./drawing-source.js";
 import { DRAWING_BRUSHES, DrawingController } from "./drawing-controller.js";
 import { BRUSH_TEXTURES, DEFAULT_BRUSH_TEXTURE_ID, brushTextureCatalog } from "./brush-textures.js";
+import { wispArtistControlsForEnergy } from "./wisp-brush.js";
 import { GLOBAL_WALLPAPER_MODES } from "./global-wallpaper.js";
 import { GENERATORS } from "./generators.js";
 
@@ -71,7 +72,8 @@ const DRAWING_CURSOR_BY_BRUSH = {
   spray: "spray",
   texture: "texture",
   fiber: "fiber",
-  hair: "fiber"
+  hair: "fiber",
+  wisp: "wisp"
 };
 
 function updateCanvasCursor() {
@@ -192,7 +194,9 @@ function restoreWorkspaceSettings() {
       if (Number.isFinite(opacity)) referenceState.opacity = Math.min(1, Math.max(0, opacity));
     }
     renderer.restoreState(saved.state);
-    if (saved.drawing?.version === 1) { drawingController.restoreState(saved.drawing.settings); drawingSource.restoreContentState(saved.drawing.content); }
+    // Workspace v1 and v2 both wrap the document state; the document itself
+    // validates/migrates its durable content version.
+    if (saved.drawing?.version === 1 || saved.drawing?.version === 2) { drawingController.restoreState(saved.drawing.settings); drawingSource.restoreContentState(saved.drawing.content); }
     if (saved.recordFps === 30 || saved.recordFps === 60) $("recordFps").value = String(saved.recordFps);
     if (saved.sourceMode === "drawing") {
       setSourceMode("drawing");
@@ -570,9 +574,19 @@ for (const eventName of ["pointerup", "pointercancel"]) referenceOverlay.addEven
 
 $("sourceImage").addEventListener("click", () => setSourceMode("bitmap"));
 $("sourceDrawing").addEventListener("click", () => setSourceMode("drawing"));
+const GENERATOR_COMPATIBLE_BRUSHES = new Set(["pen", "ribbon", "calligraphy", "spray", "texture", "fiber", "hair"]);
+function generatorStyleSnapshot() {
+  if (!GENERATOR_COMPATIBLE_BRUSHES.has(drawingController.settings.brush)) {
+    drawingController.setBrush("pen");
+    $("drawingBrush").value = drawingController.settings.brush;
+    $("drawingTool").value = drawingController.settings.tool;
+    syncDrawingBrushControls();
+    updateCanvasCursor();
+  }
+  return drawingController.styleSnapshot();
+}
 function makeSpirographDraft() {
   const generator = GENERATORS.spirograph;
-  if (!DRAWING_BRUSHES.includes(drawingController.settings.brush)) drawingController.setBrush("pen");
   return {
     kind: "generatedStroke",
     generator: generator.id,
@@ -581,18 +595,17 @@ function makeSpirographDraft() {
     animation: { amount: .5, speed: .15, phase: 0 },
     domain: { start: 0, end: generator.period() },
     sampling: { mode: "parameter", step: .01 },
-    style: drawingController.styleSnapshot()
+    style: generatorStyleSnapshot()
   };
 }
 function makeGuillocheRosetteDraft() {
   const generator = GENERATORS.guillocheRosette;
-  if (!DRAWING_BRUSHES.includes(drawingController.settings.brush)) drawingController.setBrush("pen");
   return {
     kind: "generatedStroke", generator: generator.id, generatorVersion: generator.version,
     config: structuredClone(generator.defaults),
     animation: { amount: .5, speed: .15, targets: { phaseOffset: false, secondaryAmplitude: false, secondaryFrequency: false, rotation: false } },
     domain: { start: 0, end: generator.period() },
-    sampling: { mode: "parameter", step: .01 }, style: drawingController.styleSnapshot()
+    sampling: { mode: "parameter", step: .01 }, style: generatorStyleSnapshot()
   };
 }
 function editedGenerator() { return generatorEditorId ? drawingSource.getDrawable(generatorEditorId) : null; }
@@ -644,7 +657,7 @@ function previewGeneratorDraft() {
 }
 function refreshGeneratorDraftStyle() {
   if (!generatorDraft) return;
-  generatorDraft.style = { ...drawingController.styleSnapshot(), seed: generatorDraft.style.seed };
+  generatorDraft.style = { ...generatorStyleSnapshot(), seed: generatorDraft.style.seed };
   previewGeneratorDraft();
 }
 function resetGeneratorDraft() {
@@ -774,6 +787,7 @@ function syncDrawingBrushControls(name = drawingController.settings.brush) {
   $("drawingSprayControls").hidden = name !== "spray";
   $("drawingTextureControls").hidden = name !== "texture";
   $("drawingFiberControls").hidden = name !== "fiber" && name !== "hair";
+  $("drawingWispControls").hidden = name !== "wisp";
   syncDrawingColorControls(drawingController.settings.colorMode);
   if (name === "texture") {
     loadCurrentTexture();
@@ -806,11 +820,29 @@ function syncDrawingControls() {
   $("drawingFiberGravity").value = String(drawingController.settings.gravity);
   $("drawingFiberBranching").value = String(drawingController.settings.branching);
   $("drawingFiberCurl").value = String(drawingController.settings.curl);
+  syncWispControls();
   const rotation = document.querySelector(`input[name="drawingTextureRotation"][value="${drawingController.settings.textureRotationMode}"]`);
   if (rotation) rotation.checked = true;
   syncDrawingBrushControls();
+  $("drawingTool").value = drawingController.settings.tool;
   syncDrawingColorControls();
   syncCurrentTexture();
+}
+function syncWispControls() {
+  const values = {
+    energy: Number(drawingController.settings.wispEnergy),
+    momentum: Number(drawingController.settings.wispMomentum),
+    turbulence: Number(drawingController.settings.wispTurbulence),
+    persistence: Number(drawingController.settings.wispPersistence),
+    density: Number(drawingController.settings.wispDensity)
+  };
+  $("drawingWispEnergy").value = String(values.energy);
+  $("drawingWispEnergyOut").value = `${Math.round(values.energy * 100)}%`;
+  for (const [name, digits] of [["Momentum", 2], ["Turbulence", 2], ["Persistence", 0], ["Density", 0]]) {
+    const key = name[0].toLowerCase() + name.slice(1), value = values[key];
+    $("drawingWisp" + name).value = String(value);
+    $("drawingWisp" + name + "Out").value = digits ? value.toFixed(digits) : String(Math.round(value));
+  }
 }
 function refreshDrawingHistoryControls() {
   $("undoDrawing").disabled = !drawingSource.canUndo();
@@ -823,12 +855,13 @@ $("drawingBrush").addEventListener("change", event => {
     drawingController.set("size", 64);
     $("drawingSize").value = "64";
   }
+  $("drawingTool").value = drawingController.settings.tool;
   syncDrawingBrushControls();
   updateCanvasCursor();
   refreshGeneratorDraftStyle();
   drawDrawingGuides();
 });
-$("drawingTool").addEventListener("change", event => { drawingController.setTool(event.target.value); updateCanvasCursor(); drawDrawingGuides(); });
+$("drawingTool").addEventListener("change", event => { drawingController.setTool(event.target.value); event.target.value = drawingController.settings.tool; updateCanvasCursor(); drawDrawingGuides(); });
 $("drawingSmoothing").addEventListener("input", event => {
   const percent = Number(event.target.value);
   drawingController.set("smoothing", percent / 100);
@@ -858,6 +891,22 @@ $("drawingFibers").addEventListener("input", event => { drawingController.set("f
 $("drawingFiberGravity").addEventListener("input", event => { drawingController.set("gravity", event.target.value); refreshGeneratorDraftStyle(); });
 $("drawingFiberBranching").addEventListener("input", event => { drawingController.set("branching", event.target.value); refreshGeneratorDraftStyle(); });
 $("drawingFiberCurl").addEventListener("input", event => { drawingController.set("curl", event.target.value); refreshGeneratorDraftStyle(); });
+$("drawingWispEnergy").addEventListener("input", event => {
+  const values = wispArtistControlsForEnergy(event.target.value);
+  drawingController.set("wispEnergy", values.energy);
+  drawingController.set("wispMomentum", values.momentum);
+  drawingController.set("wispTurbulence", values.turbulence);
+  drawingController.set("wispPersistence", values.persistence);
+  drawingController.set("wispDensity", values.density);
+  syncWispControls();
+});
+for (const [control, setting, digits] of [["Momentum", "wispMomentum", 2], ["Turbulence", "wispTurbulence", 2], ["Persistence", "wispPersistence", 0], ["Density", "wispDensity", 0]]) {
+  $("drawingWisp" + control).addEventListener("input", event => {
+    const value = Number(event.target.value);
+    drawingController.set(setting, value);
+    $("drawingWisp" + control + "Out").value = digits ? value.toFixed(digits) : String(Math.round(value));
+  });
+}
 $("drawingTextureSpacing").addEventListener("input", event => {
   drawingController.set("textureSpacing", event.target.value);
   $("drawingTextureSpacingOut").value = `${Number(event.target.value).toFixed(2)}×`;

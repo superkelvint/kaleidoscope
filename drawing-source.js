@@ -3,6 +3,7 @@ import { brushTextureCatalog } from "./brush-textures.js";
 import { derivePath, drawableDependsOnTime, isDrawable } from "./drawable-path.js";
 import { count, measure } from "./perf.js";
 import { DrawingDocument } from "./drawing-document.js";
+import { prepareWispPath, renderWispPrepared } from "./wisp-brush.js";
 
 const TILE_SIZE = 1024;
 const ANTIALIAS_PADDING = 2;
@@ -21,6 +22,7 @@ function brushFootprint(style = {}) {
   if (style.brush === "spray") return size / 2 + Math.max(0, finite(style.particleSize)) / 2;
   if (style.brush === "texture") return size * Math.SQRT2 / 2;
   if (style.brush === "fiber" || style.brush === "hair") return size * 5;
+  if (style.brush === "wisp") return size / 16;
   return size / 2;
 }
 function boundsForPath(path, style) {
@@ -172,8 +174,13 @@ export class DrawingRasterizer {
     const id = operation?.id;
     const dynamic = drawableDependsOnTime(operation?.drawable);
     if (!dynamic && id && this.preparedDrawables.has(id)) return this.preparedDrawables.get(id);
-    const path = dynamic ? null : derivePath(operation.drawable, { width: this.width, height: this.height, time: this.time });
-    const prepared = { dynamic, path, bounds: path ? boundsForPath(path, operation.drawable.style) : null };
+    const wisp = operation?.drawable?.kind === "pathStroke" && operation.drawable?.style?.brush === "wisp";
+    const path = dynamic || wisp ? null : derivePath(operation.drawable, { width: this.width, height: this.height, time: this.time });
+    // Wisp's emission stream can be large.  Keep only its exact derived
+    // bounds here; a paint invocation prepares one transient stream and drops
+    // it after all periodic copies have been deposited.
+    const wispPrepared = wisp ? measure("Wisp bounds simulation", () => prepareWispPath(operation.drawable.points, operation.drawable.style), () => this.perfMetadata({ brush: "wisp" })) : null;
+    const prepared = { dynamic, wisp, path, bounds: wisp ? wispPrepared.bounds && { left: Math.floor(wispPrepared.bounds.left - ANTIALIAS_PADDING), top: Math.floor(wispPrepared.bounds.top - ANTIALIAS_PADDING), right: Math.ceil(wispPrepared.bounds.right + ANTIALIAS_PADDING), bottom: Math.ceil(wispPrepared.bounds.bottom + ANTIALIAS_PADDING) } : path ? boundsForPath(path, operation.drawable.style) : null };
     if (!dynamic && id) this.preparedDrawables.set(id, prepared);
     return prepared;
   }
@@ -262,7 +269,8 @@ export class DrawingRasterizer {
     this.paintOperation(operation, context, { tile, periodic: true });
   }
   paintDrawable(drawable, context = this.ctx, { preview = false, tile = null, transform = null, prepared = null, periodic = false } = {}) {
-    const path = prepared?.path || derivePath(drawable, { width: this.width, height: this.height, time: this.time }); if (!path.contours.length) return;
+    const wisp = drawable?.kind === "pathStroke" && drawable?.style?.brush === "wisp";
+    const path = wisp ? null : (prepared?.path || derivePath(drawable, { width: this.width, height: this.height, time: this.time })); if (!wisp && !path.contours.length) return;
     if (["fiber", "hair"].includes(drawable.style.brush)) count("Drawing Fiber rasterization", () => this.perfMetadata({ preview, tile: tile ? { x: tile.x, y: tile.y } : null }));
     if (drawable.style.brush === "texture" && !brushTextureCatalog.get(drawable.style.textureId)) { this.requestTextureReplay(drawable.style.textureId); return; }
     context.save();
@@ -271,10 +279,15 @@ export class DrawingRasterizer {
     const target = tile
       ? { left: tile.x, top: tile.y, width: tile.width, height: tile.height }
       : this.materialBounds;
+    const wispPrepared = wisp ? measure("Wisp replay simulation", () => prepareWispPath(drawable.points, drawable.style, { tail: !preview }), () => this.perfMetadata({ preview, tile: tile ? { x: tile.x, y: tile.y } : null, brush: "wisp" })) : null;
+    const bounds = wisp ? wispPrepared.bounds && { left: wispPrepared.bounds.left - ANTIALIAS_PADDING, top: wispPrepared.bounds.top - ANTIALIAS_PADDING, right: wispPrepared.bounds.right + ANTIALIAS_PADDING, bottom: wispPrepared.bounds.bottom + ANTIALIAS_PADDING } : boundsForPath(path, drawable.style);
     const translations = periodic
-      ? periodicTranslations(boundsForPath(path, drawable.style), this.materialBounds, target)
+      ? periodicTranslations(bounds, this.materialBounds, target)
       : [{ x: 0, y: 0 }];
-    for (const translation of translations) this.replayContours(context, path.contours, drawable.style, translation, preview);
+    for (const translation of translations) {
+      if (wisp) { context.save(); context.translate(translation.x, translation.y); renderWispPrepared(context, wispPrepared, drawable.style); context.restore(); }
+      else this.replayContours(context, path.contours, drawable.style, translation, preview);
+    }
     context.restore();
   }
   replayContours(context, contours, style, translation = { x: 0, y: 0 }, preview = false) { context.save(); context.translate(translation.x, translation.y); measure("Canvas brush replay", () => replayBrushContours(context, contours, preview ? { ...style, preview: true } : style), () => this.perfMetadata({ preview, contourCount: contours.length })); context.restore(); }

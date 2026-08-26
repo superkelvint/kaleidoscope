@@ -1,6 +1,7 @@
 import { brushTextureCatalog } from "./brush-textures.js";
 import { measure } from "./perf.js";
 import { renderFiberPath } from "./fiber-brush.js";
+import { renderWispPath } from "./wisp-brush.js";
 import { BrushPainter, toBrushPainter } from "./brush-painter.js";
 
 const TAU = Math.PI * 2;
@@ -106,7 +107,8 @@ export const BRUSHES = {
   spray: immediateBrush(sprayStamp),
   texture: immediateBrush(textureStamp),
   fiber: { begin() {}, move() {}, end() {} },
-  hair: { begin() {}, move() {}, end() {} }
+  hair: { begin() {}, move() {}, end() {} },
+  wisp: { begin() {}, move() {}, end() {} }
 };
 
 /** A small deterministic generator for replaying a stored spray gesture. */
@@ -206,6 +208,10 @@ export function replayBrushPath(ctx, points, options, { closed = false } = {}) {
   if (!points?.length) return;
   if (options.brush === "fiber" || options.brush === "hair") {
     renderFiberPath(ctx, points, options, { preview: options.preview === true });
+    return;
+  }
+  if (options.brush === "wisp") {
+    renderWispPath(ctx, points, options, { tail: options.preview !== true });
     return;
   }
   // A solid, untapered Pen has the same round-cap deposition as a native

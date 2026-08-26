@@ -32,6 +32,79 @@ test("tool and brush settings are independent", () => {
   assert.equal(controller.settings.brush, "texture");
 });
 
+test("Wisp forces freehand and stores fixed-rate duplicate samples without normal reduction", () => {
+  const commits = [];
+  const source = { width: 100, height: 100, previewDrawable() {}, commitDrawable: drawable => { commits.push(drawable); return true; } };
+  const controller = new DrawingController({ source });
+  controller.setTool("arc"); controller.setBrush("wisp");
+  assert.equal(controller.settings.tool, "freehand");
+  controller.begin(event("down", 40, 40), canvas);
+  for (let i = 0; i < 700; i += 1) controller.deposit();
+  controller.end(event("up", 40, 40));
+  assert.equal(commits[0].style.version, 2);
+  assert.equal(commits[0].style.wispUnitsPerPixel, 1, "the frozen Wisp recipe persists source units per display pixel");
+  assert.ok(Number.isFinite(commits[0].style.wispCenterX) && Number.isFinite(commits[0].style.wispCenterY), "the frozen Wisp recipe persists the mapped display center");
+  assert.ok(commits[0].points.length > 512, "Wisp's simulation samples are never decimated");
+  assert.deepEqual(commits[0].points[0], commits[0].points[1], "a stationary timer tick is a real sample");
+});
+
+test("Wisp style snapshots persist the v2 artist controls", () => {
+  const source = { width: 100, height: 100, previewDrawable() {}, commitDrawable() { return true; } };
+  const controller = new DrawingController({ source });
+  controller.setBrush("wisp");
+  controller.set("wispEnergy", .8);
+  controller.set("wispMomentum", .42);
+  controller.set("wispTurbulence", 1.4);
+  controller.set("wispPersistence", 240);
+  controller.set("wispDensity", 8);
+  const style = controller.styleSnapshot();
+  assert.equal(style.version, 2);
+  assert.deepEqual({ energy: style.energy, momentum: style.momentum, turbulence: style.turbulence, persistence: style.persistence, density: style.density }, {
+    energy: .8, momentum: .42, turbulence: 1.4, persistence: 240, density: 8
+  });
+});
+
+test("Wisp freezes its logical-pixel scale from the gesture mapping", () => {
+  const commits = [], wideCanvas = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 200, height: 100 }) };
+  const source = { width: 800, height: 400, previewDrawable() {}, commitDrawable: drawable => { commits.push(drawable); return true; } };
+  const controller = new DrawingController({ source, getRendererState: () => ({ zoom: 2 }) });
+  controller.setBrush("wisp");
+  controller.begin(event("down", 10, 10), wideCanvas);
+  controller.deposit();
+  controller.end(event("up", 10, 10));
+  assert.equal(commits[0].style.wispUnitsPerPixel, 2);
+});
+
+test("Wisp pointer moves and pointerup never synthesize off-clock samples", () => {
+  const previews = [], commits = [];
+  const source = { width: 100, height: 100, previewDrawable: value => previews.push(value), commitDrawable: drawable => { commits.push(drawable); return true; } };
+  const controller = new DrawingController({ source });
+  controller.setBrush("wisp");
+  controller.begin(event("down", 10, 10), canvas);
+  assert.equal(controller.current.points.length, 0, "pointer-down only records Wisp's current input position");
+  controller.move(event("move", 70, 40));
+  assert.equal(previews.length, 0, "raw movement only updates Wisp's latest pointer");
+  controller.deposit();
+  assert.equal(controller.current.points.length, 1, "the fixed clock appends Wisp's first logical sample");
+  assert.deepEqual({ x: controller.current.points[0].inputScreenVx, y: controller.current.points[0].inputScreenVy }, { x: 60, y: 30 }, "the durable Wisp sample retains raw display-axis input velocity");
+  const lastClockSample = structuredClone(controller.current.points.at(-1));
+  controller.end(event("up", 90, 50));
+  assert.equal(commits[0].points.length, 1, "release does not create an off-clock velocity sample");
+  assert.deepEqual(commits[0].points.at(-1), lastClockSample);
+});
+
+test("Wisp retains the available pre-drag logical pointer delta for its first clock sample", () => {
+  const commits = [];
+  const source = { width: 100, height: 100, previewDrawable() {}, commitDrawable: drawable => { commits.push(drawable); return true; } };
+  const controller = new DrawingController({ source });
+  controller.setBrush("wisp");
+  controller.move(event("move", 4, 8));
+  controller.begin(event("down", 10, 10), canvas);
+  controller.deposit();
+  controller.end(event("up", 10, 10));
+  assert.deepEqual({ x: commits[0].points[0].inputScreenVx, y: commits[0].points[0].inputScreenVy }, { x: 6, y: 2 });
+});
+
 test("solid style snapshots do not retain gradient endpoint colors", () => {
   const source = { width: 100, height: 100, previewDrawable() {}, commitDrawable() { return true; } };
   const controller = new DrawingController({ source });

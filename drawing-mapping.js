@@ -34,3 +34,17 @@ export function screenToSourcePoint(event, displayCanvas, rendererState = {}, so
   // into the finite periodic material, avoiding a false long segment at seams.
   return { x: source.x * sourceWidth, y: (1 - source.y) * sourceHeight };
 }
+
+/**
+ * Source-space distance represented by one logical display pixel for a frozen
+ * mapping. Local/wallpaper motifs only rotate or reflect this space, so this
+ * remains the local isotropic scale without sampling across a fold seam.
+ */
+export function sourceUnitsPerDisplayPixel(displayCanvas, rendererState = {}, sourceWidth, sourceHeight) {
+  const rect = displayCanvas.getBoundingClientRect();
+  const zoom = Math.max(Number(rendererState.zoom) || 1, .001);
+  // screenToSourcePoint first consumes display aspect and then divides X by
+  // image aspect, making both display axes resolve to sourceHeight/rect.height.
+  const scale = sourceHeight / Math.max(rect.height, 1) / zoom;
+  return Number.isFinite(scale) && scale > 0 ? scale : 1;
+}

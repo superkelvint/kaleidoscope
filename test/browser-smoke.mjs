@@ -107,6 +107,25 @@ try {
   assert.deepEqual(periodicDrift.afterMaterial, periodicDrift.material, "source motion does not move the repeat domain");
   assert.equal(periodicDrift.afterRebuilds, periodicDrift.rebuilds, "source motion does not rebuild the material");
   assert.deepEqual(periodicDrift.afterDiagnostics, periodicDrift.diagnostics, "source motion does not upload unchanged drawing pixels");
+  await page.locator("#drawingBrush").selectOption("wisp");
+  await page.locator("#drawingWispEnergy").fill("0.8");
+  await page.locator("#drawingWispMomentum").fill("0.42");
+  await page.locator("#drawingWispTurbulence").fill("1.4");
+  await page.locator("#drawingWispPersistence").fill("240");
+  await page.locator("#drawingWispDensity").fill("8");
+  await drawWisp(page, canvas);
+  const wispStyle = await page.evaluate(() => window.__KALEIDOSCOPE_TEST_HOOKS__.drawingSource.findLatestDrawable()?.style);
+  assert.equal(wispStyle?.brush, "wisp", "a browser Wisp gesture commits through the fixed-rate controller path");
+  assert.deepEqual({ version: wispStyle?.version, energy: wispStyle?.energy, momentum: wispStyle?.momentum, turbulence: wispStyle?.turbulence, persistence: wispStyle?.persistence, density: wispStyle?.density }, { version: 2, energy: .8, momentum: .42, turbulence: 1.4, persistence: 240, density: 8 }, "the Wisp UI commits every artist control into the durable recipe");
+  assert.ok(Number.isFinite(wispStyle?.wispUnitsPerPixel) && wispStyle.wispUnitsPerPixel > 0, "the browser Wisp stroke persists its frozen logical-pixel scale");
+  await page.locator("#drawingTool").selectOption("arc");
+  assert.equal(await page.locator("#drawingTool").inputValue(), "freehand", "Wisp tool coercion is reflected in the UI");
+  await page.locator("#drawingGenerator").selectOption("spirograph");
+  const generatorBrush = await page.evaluate(() => {
+    const hooks = window.__KALEIDOSCOPE_TEST_HOOKS__;
+    return { control: document.querySelector("#drawingBrush").value, controller: hooks.drawingController.settings.brush, preview: hooks.drawingSource.preview?.style?.brush };
+  });
+  assert.deepEqual(generatorBrush, { control: "pen", controller: "pen", preview: "pen" }, "generated paths cannot reinterpret Wisp time samples as spatial samples");
   assert.deepEqual(errors, []);
 } finally {
   await browser?.close(); server.kill("SIGTERM");
@@ -118,5 +137,16 @@ async function draw(page, canvas, y) {
   const x1 = box.x + 120, x2 = box.x + Math.min(box.width - 80, 400);
   await page.mouse.move(x1, box.y + y); await page.mouse.down();
   for (let i = 1; i <= 10; i += 1) await page.mouse.move(x1 + (x2 - x1) * i / 10, box.y + y + Math.sin(i / 10 * Math.PI) * 18);
+  await page.mouse.up(); await page.waitForTimeout(50);
+}
+
+async function drawWisp(page, canvas) {
+  const box = await canvas.boundingBox(); assert.ok(box, "canvas has bounds");
+  const y = box.y + 250, start = box.x + 160, end = box.x + Math.min(box.width - 100, 520);
+  await page.mouse.move(start, y); await page.mouse.down();
+  for (let i = 1; i <= 8; i += 1) {
+    await page.waitForTimeout(18);
+    await page.mouse.move(start + (end - start) * i / 8, y);
+  }
   await page.mouse.up(); await page.waitForTimeout(50);
 }
