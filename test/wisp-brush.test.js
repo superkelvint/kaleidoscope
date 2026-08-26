@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { BrushPainter } from "../brush-painter.js";
-import { WISP_V1, interpolateWispHcl, prepareWispPath, renderWispPath, wispNoise3d } from "../wisp-brush.js";
+import { WISP_V1, advanceWispSimulation, createWispLivePreview, createWispSimulation, interpolateWispHcl, prepareWispPath, renderWispPath, wispNoise3d } from "../wisp-brush.js";
 
 const style = { brush: "wisp", version: 1, color: "#ff0000", colorMode: "solid", size: 16, opacity: .8 };
 const path = [{ x: 10, y: 10 }, { x: 25, y: 16 }, { x: 42, y: 29 }, { x: 58, y: 25 }, { x: 72, y: 40 }];
@@ -45,6 +45,30 @@ test("Wisp preview is a prefix of the same deterministic simulation without a re
   const preview = prepareWispPath(path, style, { tail: false });
   const committed = prepareWispPath(path, style, { tail: true });
   assert.deepEqual(committed.emissions.slice(0, preview.emissions.length), preview.emissions);
+});
+
+test("Wisp incremental simulation is exactly the authoritative no-tail replay", () => {
+  const authoritative = prepareWispPath(path, style, { tail: false });
+  const state = createWispSimulation(style), emissions = [];
+  for (const sample of path) advanceWispSimulation(state, sample, emission => emissions.push(emission));
+  assert.deepEqual(emissions, authoritative.emissions);
+  assert.equal(state.time, authoritative.steps, "the simulation clock advances identically");
+  assert.equal(state.maxParticles, authoritative.maxParticles);
+
+  const live = createWispLivePreview({ kind: "pathStroke", points: [], style });
+  const painted = [];
+  for (let index = 0; index < path.length; index += 1) {
+    const drawable = { kind: "pathStroke", points: path.slice(0, index + 1), style };
+    assert.equal(live.compatible(drawable), true);
+    live.advance(drawable);
+    live.paintDelta(new BrushPainter(item => painted.push(item)));
+    live.finishDelta();
+    assert.equal(live.consumedSampleCount, index + 1);
+  }
+  const replayed = [];
+  renderWispPath(new BrushPainter(item => replayed.push(item)), path, style, { tail: false });
+  assert.deepEqual(painted, replayed, "incremental delta deposition is identical to one no-tail replay");
+  assert.equal(live.activeParticleCount, state.curve.length);
 });
 
 test("Wisp physics is invariant when source coordinates are scaled with frozen display units", () => {

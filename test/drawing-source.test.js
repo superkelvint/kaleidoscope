@@ -91,6 +91,20 @@ test("completed Wisp is static and its exact transient bounds reject distant spa
   assert.equal(paints, 0, "distant tile replay is rejected from Wisp's derived bounds");
 }));
 
+test("Wisp preview accumulates one appended sample through the generic live-brush session", () => withSource(() => {
+  const source = new DrawingSource({ width: 100, height: 100 });
+  const stroke = wispDrawable();
+  source.previewDrawable({ ...stroke, points: stroke.points.slice(0, 4) });
+  const first = source.rasterizer.livePreview;
+  assert.ok(first, "Wisp opts into the brush-neutral live preview seam");
+  assert.equal(first.session.consumedSampleCount, 4);
+  source.previewDrawable(stroke);
+  assert.equal(source.rasterizer.livePreview, first, "an append retains the accumulating preview canvas/session");
+  assert.equal(first.session.consumedSampleCount, 5, "one steady-state preview update consumes one new durable sample");
+  source.previewDrawable(null);
+  assert.equal(source.rasterizer.livePreview, null, "clearing a preview disposes transient brush state");
+}));
+
 test("periodic material keeps cache tiles inside its fixed domain", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
   const crossing = { ...drawable(), points: [{ x: 90, y: 20 }, { x: 110, y: 20 }] };

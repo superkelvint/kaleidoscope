@@ -1,7 +1,7 @@
 import { brushTextureCatalog } from "./brush-textures.js";
 import { measure } from "./perf.js";
 import { renderFiberPath } from "./fiber-brush.js";
-import { renderWispPath } from "./wisp-brush.js";
+import { createWispLivePreview, prepareWispPath, renderWispPath, renderWispPrepared } from "./wisp-brush.js";
 import { BrushPainter, toBrushPainter } from "./brush-painter.js";
 
 const TAU = Math.PI * 2;
@@ -110,6 +110,21 @@ export const BRUSHES = {
   hair: { begin() {}, move() {}, end() {} },
   wisp: { begin() {}, move() {}, end() {} }
 };
+
+/** Optional brush-neutral incremental preview seam. */
+export function createLiveBrushPreview(drawable) {
+  return drawable?.kind === "pathStroke" && drawable?.style?.brush === "wisp" ? createWispLivePreview(drawable) : null;
+}
+
+/** Some brushes have an authoritative transient replay preparation step. */
+export function prepareBrushReplay(drawable, { tail = true } = {}) {
+  if (drawable?.kind === "pathStroke" && drawable?.style?.brush === "wisp") return prepareWispPath(drawable.points, drawable.style, { tail });
+  return null;
+}
+
+export function renderPreparedBrush(target, prepared, style) {
+  if (prepared) renderWispPrepared(target, prepared, style);
+}
 
 /** A small deterministic generator for replaying a stored spray gesture. */
 export function createSeededRandom(seed) {

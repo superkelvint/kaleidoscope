@@ -1,9 +1,8 @@
-import { BRUSHES, canReplayBrushPath, replayBrushContours } from "./brushes.js";
+import { BRUSHES, canReplayBrushPath, createLiveBrushPreview, prepareBrushReplay, renderPreparedBrush, replayBrushContours } from "./brushes.js";
 import { brushTextureCatalog } from "./brush-textures.js";
 import { derivePath, drawableDependsOnTime, isDrawable } from "./drawable-path.js";
 import { count, measure } from "./perf.js";
 import { DrawingDocument } from "./drawing-document.js";
-import { prepareWispPath, renderWispPrepared } from "./wisp-brush.js";
 
 const TILE_SIZE = 1024;
 const ANTIALIAS_PADDING = 2;
@@ -22,7 +21,6 @@ function brushFootprint(style = {}) {
   if (style.brush === "spray") return size / 2 + Math.max(0, finite(style.particleSize)) / 2;
   if (style.brush === "texture") return size * Math.SQRT2 / 2;
   if (style.brush === "fiber" || style.brush === "hair") return size * 5;
-  if (style.brush === "wisp") return size / 16;
   return size / 2;
 }
 function boundsForPath(path, style) {
@@ -75,7 +73,7 @@ export class DrawingRasterizer {
     this.baseStaticCanvas = createPaintCanvas(this.width, this.height); this.baseStaticCtx = this.baseStaticCanvas.getContext("2d");
     this.materialBounds = { left: 0, top: 0, width: this.width, height: this.height };
     this.materialScale = 1; this.requestedPixelDensity = 1; this.materialRebuildCount = 0;
-    this.tiles = new Map(); this.operations = []; this.preview = null;
+    this.tiles = new Map(); this.operations = []; this.preview = null; this.livePreview = null;
     this.backgroundColor = "#000000"; this.time = 0; this.revision = 0; this.onFrameChange = onFrameChange;
     this.pendingTextureReplays = new Set();
     // Bounds are derived cache metadata, never durable drawable state. They
@@ -106,22 +104,56 @@ export class DrawingRasterizer {
 
   previewDrawable(drawable) {
     this.preview = this.isDrawable(drawable) ? structuredClone(drawable) : null;
+    if (!this.preview) this.disposeLivePreview();
+    else this.advanceLivePreview(this.preview);
     return measure("Drawing preview drawable", () => this.rerender(), () => this.perfMetadata());
+  }
+  disposeLivePreview() {
+    this.livePreview?.session?.dispose?.();
+    this.livePreview = null;
+  }
+  advanceLivePreview(drawable) {
+    let session = this.livePreview?.session;
+    if (session && !session.compatible(drawable)) this.disposeLivePreview();
+    session = this.livePreview?.session;
+    if (!session) {
+      session = createLiveBrushPreview(drawable);
+      if (!session) return false;
+      if (this.committedDirty) this.composeCommittedMaterial();
+      const canvas = createPaintCanvas(this.canvas.width, this.canvas.height), context = canvas.getContext("2d");
+      context.drawImage(this.committedCanvas, 0, 0);
+      this.livePreview = { canvas, context, session };
+    }
+    const consumedBefore = session.consumedSampleCount;
+    const advanced = measure("Drawing live brush preview simulation", () => session.advance(drawable), () => this.perfMetadata({ newSampleCount: session.consumedSampleCount - consumedBefore, activeParticleCount: session.activeParticleCount }));
+    if (!advanced) return false;
+    const bounds = session.deltaBounds();
+    if (!bounds) { session.finishDelta?.(); return false; }
+    const sx = this.canvas.width / this.materialBounds.width, sy = this.canvas.height / this.materialBounds.height;
+    const context = this.livePreview.context;
+    context.save(); context.translate(-this.materialBounds.left * sx, -this.materialBounds.top * sy); context.scale?.(sx, sy);
+    for (const translation of periodicTranslations(bounds, this.materialBounds, this.materialBounds)) {
+      context.save(); context.translate(translation.x, translation.y);
+      measure("Drawing live brush preview paint", () => session.paintDelta(context), () => this.perfMetadata({ newSampleCount: session.consumedSampleCount - consumedBefore, activeParticleCount: session.activeParticleCount }));
+      context.restore();
+    }
+    context.restore(); session.finishDelta?.();
+    return true;
   }
   rebuildFrom(view) {
     this.backgroundColor = view.backgroundColor;
     this.operations = view.operations.map(operation => ({ type: "drawable", id: operation.id, drawable: structuredClone(operation.drawable) }));
-    this.preview = null; this.tiles.clear(); this.preparedDrawables.clear(); this.rebuildBase(); this.invalidateCommittedView(); this.rerender();
+    this.preview = null; this.disposeLivePreview(); this.tiles.clear(); this.preparedDrawables.clear(); this.rebuildBase(); this.invalidateCommittedView(); this.rerender();
   }
   applyChange(change, view) {
     if (!change) return false;
     if (change.type === "append") {
-      this.preview = null;
+      this.preview = null; this.disposeLivePreview();
       this.appendOperation({ type: "drawable", id: change.id, drawable: structuredClone(change.drawable) });
       return true;
     }
-    if (change.type === "background") { this.backgroundColor = change.after; this.invalidateCommittedView(); this.rerender(); return true; }
-    if (change.type === "clear") { this.preview = null; this.operations = []; this.tiles.clear(); this.preparedDrawables.clear(); this.renderIndex.clear(); this.staticPrefixEnd = 0; this.staticCheckpoints = []; this.invalidateCommittedView(); this.rerender(); return true; }
+    if (change.type === "background") { this.backgroundColor = change.after; this.disposeLivePreview(); this.invalidateCommittedView(); this.rerender(); return true; }
+    if (change.type === "clear") { this.preview = null; this.disposeLivePreview(); this.operations = []; this.tiles.clear(); this.preparedDrawables.clear(); this.renderIndex.clear(); this.staticPrefixEnd = 0; this.staticCheckpoints = []; this.invalidateCommittedView(); this.rerender(); return true; }
     // Replacement and undo have non-local z-order effects. Rebuild from the
     // authoritative document rather than guessing from two snapshots.
     this.rebuildFrom(view); return true;
@@ -174,13 +206,9 @@ export class DrawingRasterizer {
     const id = operation?.id;
     const dynamic = drawableDependsOnTime(operation?.drawable);
     if (!dynamic && id && this.preparedDrawables.has(id)) return this.preparedDrawables.get(id);
-    const wisp = operation?.drawable?.kind === "pathStroke" && operation.drawable?.style?.brush === "wisp";
-    const path = dynamic || wisp ? null : derivePath(operation.drawable, { width: this.width, height: this.height, time: this.time });
-    // Wisp's emission stream can be large.  Keep only its exact derived
-    // bounds here; a paint invocation prepares one transient stream and drops
-    // it after all periodic copies have been deposited.
-    const wispPrepared = wisp ? measure("Wisp bounds simulation", () => prepareWispPath(operation.drawable.points, operation.drawable.style), () => this.perfMetadata({ brush: "wisp" })) : null;
-    const prepared = { dynamic, wisp, path, bounds: wisp ? wispPrepared.bounds && { left: Math.floor(wispPrepared.bounds.left - ANTIALIAS_PADDING), top: Math.floor(wispPrepared.bounds.top - ANTIALIAS_PADDING), right: Math.ceil(wispPrepared.bounds.right + ANTIALIAS_PADDING), bottom: Math.ceil(wispPrepared.bounds.bottom + ANTIALIAS_PADDING) } : path ? boundsForPath(path, operation.drawable.style) : null };
+    const brushPrepared = dynamic ? null : prepareBrushReplay(operation.drawable);
+    const path = dynamic || brushPrepared ? null : derivePath(operation.drawable, { width: this.width, height: this.height, time: this.time });
+    const prepared = { dynamic, brushPrepared: Boolean(brushPrepared), path, bounds: brushPrepared ? brushPrepared.bounds && { left: Math.floor(brushPrepared.bounds.left - ANTIALIAS_PADDING), top: Math.floor(brushPrepared.bounds.top - ANTIALIAS_PADDING), right: Math.ceil(brushPrepared.bounds.right + ANTIALIAS_PADDING), bottom: Math.ceil(brushPrepared.bounds.bottom + ANTIALIAS_PADDING) } : path ? boundsForPath(path, operation.drawable.style) : null };
     if (!dynamic && id) this.preparedDrawables.set(id, prepared);
     return prepared;
   }
@@ -218,7 +246,7 @@ export class DrawingRasterizer {
     count("Drawing prepare material", metadata);
     if (!changed) return measure("Drawing prepare material unchanged", () => false, metadata);
     return measure("Drawing prepare material change", () => {
-      this.materialScale = nextScale;
+      this.disposeLivePreview(); this.materialScale = nextScale;
       const pixelWidth = Math.max(1, Math.min(MAX_MATERIAL_PIXELS, Math.round(this.materialBounds.width * nextScale)));
       const pixelHeight = Math.max(1, Math.min(MAX_MATERIAL_PIXELS, Math.round(this.materialBounds.height * nextScale)));
       this.canvas.width = pixelWidth; this.canvas.height = pixelHeight;
@@ -258,7 +286,8 @@ export class DrawingRasterizer {
       this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height); this.ctx.save(); this.ctx.globalAlpha = 1;
       count("Drawing committed canvas drawImage", () => this.perfMetadata());
       this.ctx.drawImage(this.committedCanvas, 0, 0);
-      if (this.preview) this.paintDrawable(this.preview, this.ctx, { preview: true, periodic: true, transform: { x: -this.materialBounds.left, y: -this.materialBounds.top, sx, sy } });
+      if (this.livePreview) this.ctx.drawImage(this.livePreview.canvas, 0, 0);
+      else if (this.preview) this.paintDrawable(this.preview, this.ctx, { preview: true, periodic: true, transform: { x: -this.materialBounds.left, y: -this.materialBounds.top, sx, sy } });
       this.ctx.restore();
     }, metadata);
   }
@@ -269,8 +298,8 @@ export class DrawingRasterizer {
     this.paintOperation(operation, context, { tile, periodic: true });
   }
   paintDrawable(drawable, context = this.ctx, { preview = false, tile = null, transform = null, prepared = null, periodic = false } = {}) {
-    const wisp = drawable?.kind === "pathStroke" && drawable?.style?.brush === "wisp";
-    const path = wisp ? null : (prepared?.path || derivePath(drawable, { width: this.width, height: this.height, time: this.time })); if (!wisp && !path.contours.length) return;
+    const brushPrepared = prepareBrushReplay(drawable, { tail: !preview });
+    const path = brushPrepared ? null : (prepared?.path || derivePath(drawable, { width: this.width, height: this.height, time: this.time })); if (!brushPrepared && !path.contours.length) return;
     if (["fiber", "hair"].includes(drawable.style.brush)) count("Drawing Fiber rasterization", () => this.perfMetadata({ preview, tile: tile ? { x: tile.x, y: tile.y } : null }));
     if (drawable.style.brush === "texture" && !brushTextureCatalog.get(drawable.style.textureId)) { this.requestTextureReplay(drawable.style.textureId); return; }
     context.save();
@@ -279,13 +308,13 @@ export class DrawingRasterizer {
     const target = tile
       ? { left: tile.x, top: tile.y, width: tile.width, height: tile.height }
       : this.materialBounds;
-    const wispPrepared = wisp ? measure("Wisp replay simulation", () => prepareWispPath(drawable.points, drawable.style, { tail: !preview }), () => this.perfMetadata({ preview, tile: tile ? { x: tile.x, y: tile.y } : null, brush: "wisp" })) : null;
-    const bounds = wisp ? wispPrepared.bounds && { left: wispPrepared.bounds.left - ANTIALIAS_PADDING, top: wispPrepared.bounds.top - ANTIALIAS_PADDING, right: wispPrepared.bounds.right + ANTIALIAS_PADDING, bottom: wispPrepared.bounds.bottom + ANTIALIAS_PADDING } : boundsForPath(path, drawable.style);
+    const replay = brushPrepared;
+    const bounds = replay ? replay.bounds && { left: replay.bounds.left - ANTIALIAS_PADDING, top: replay.bounds.top - ANTIALIAS_PADDING, right: replay.bounds.right + ANTIALIAS_PADDING, bottom: replay.bounds.bottom + ANTIALIAS_PADDING } : boundsForPath(path, drawable.style);
     const translations = periodic
       ? periodicTranslations(bounds, this.materialBounds, target)
       : [{ x: 0, y: 0 }];
     for (const translation of translations) {
-      if (wisp) { context.save(); context.translate(translation.x, translation.y); renderWispPrepared(context, wispPrepared, drawable.style); context.restore(); }
+      if (replay) { context.save(); context.translate(translation.x, translation.y); renderPreparedBrush(context, replay, drawable.style); context.restore(); }
       else this.replayContours(context, path.contours, drawable.style, translation, preview);
     }
     context.restore();

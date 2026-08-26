@@ -172,29 +172,48 @@ function step(state) {
   const newest = curve.at(-1), points = drawCurve(curve);
   return newest && points ? { points, newest: { life: newest.life, inputVx: newest.inputVx, inputVy: newest.inputVy } } : null;
 }
+export function createWispSimulation(style = {}) {
+  return {
+    curve: [], time: 0, unitsPerPixel: unitsPerPixel(style), centerX: Number(style.wispCenterX), centerY: Number(style.wispCenterY),
+    recipe: wispRecipe(style), prior: null, maxParticles: 0, steps: 0
+  };
+}
+/** Advance the deterministic simulation by exactly one durable input sample. */
+export function advanceWispSimulation(state, sample, emit = () => {}) {
+  const next = { x: finite(sample?.x), y: finite(sample?.y) };
+  const prior = state.prior || next;
+  const inputVx = next.x - prior.x, inputVy = next.y - prior.y;
+  const inputScreenVx = Number.isFinite(Number(sample?.inputScreenVx)) ? Number(sample.inputScreenVx) : inputVx;
+  const inputScreenVy = Number.isFinite(Number(sample?.inputScreenVy)) ? Number(sample.inputScreenVy) : inputVy;
+  state.curve.push({ px: next.x, py: next.y, x: next.x, y: next.y, inputVx, inputVy, inputScreenVx, inputScreenVy, life: state.recipe.startLife });
+  state.prior = next;
+  for (let draw = 0; draw < state.recipe.drawsPerFrame; draw += 1) {
+    const emission = step(state); state.steps += 1;
+    if (emission) emit(emission);
+    state.maxParticles = Math.max(state.maxParticles, state.curve.length);
+  }
+}
+/** Settle the deterministic release tail after the final durable sample. */
+export function settleWispSimulation(state, emit = () => {}) {
+  while (state.curve.length) {
+    const emission = step(state); state.steps += 1;
+    if (emission) emit(emission);
+    state.maxParticles = Math.max(state.maxParticles, state.curve.length);
+  }
+}
+function boundsForWispEmissions(emissions, style) {
+  const width = Math.max(.2, finite(style.size) / 8) * unitsPerPixel(style), pad = width / 2;
+  let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+  for (const emission of emissions) for (const point of emission.points) { left = Math.min(left, point.x - pad); top = Math.min(top, point.y - pad); right = Math.max(right, point.x + pad); bottom = Math.max(bottom, point.y + pad); }
+  return Number.isFinite(left) ? { left, top, right, bottom } : null;
+}
 /** Computes transient complete-curve snapshots; no emission state is retained. */
 export function prepareWispPath(points, style = {}, { tail = true } = {}) {
   if (!Array.isArray(points) || !points.length) return { emissions: [], bounds: null, maxParticles: 0, steps: 0 };
-  const recipe = wispRecipe(style), state = { curve: [], time: 0, unitsPerPixel: unitsPerPixel(style), centerX: Number(style.wispCenterX), centerY: Number(style.wispCenterY), recipe }, emissions = [];
-  let prior = { x: finite(points[0].x), y: finite(points[0].y) }, maxParticles = 0, steps = 0;
-  const drawStep = () => { const emission = step(state); steps += 1; if (emission) emissions.push(emission); maxParticles = Math.max(maxParticles, state.curve.length); };
-  for (const sample of points) {
-    const next = { x: finite(sample.x), y: finite(sample.y) };
-    const inputVx = next.x - prior.x, inputVy = next.y - prior.y;
-    // Legacy/hand-authored points have no display-axis fields. In that case,
-    // preserve the prior source-axis behavior rather than reinterpreting old
-    // saved Wisp artwork.
-    const inputScreenVx = Number.isFinite(Number(sample.inputScreenVx)) ? Number(sample.inputScreenVx) : inputVx;
-    const inputScreenVy = Number.isFinite(Number(sample.inputScreenVy)) ? Number(sample.inputScreenVy) : inputVy;
-    state.curve.push({ px: next.x, py: next.y, x: next.x, y: next.y, inputVx, inputVy, inputScreenVx, inputScreenVy, life: recipe.startLife });
-    prior = next;
-    for (let draw = 0; draw < recipe.drawsPerFrame; draw += 1) drawStep();
-  }
-  while (tail && state.curve.length) drawStep();
-  const width = Math.max(.2, finite(style.size) / 8) * state.unitsPerPixel, pad = width / 2;
-  let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
-  for (const emission of emissions) for (const point of emission.points) { left = Math.min(left, point.x - pad); top = Math.min(top, point.y - pad); right = Math.max(right, point.x + pad); bottom = Math.max(bottom, point.y + pad); }
-  return { emissions, bounds: Number.isFinite(left) ? { left, top, right, bottom } : null, maxParticles, steps };
+  const state = createWispSimulation(style), emissions = [];
+  for (const sample of points) advanceWispSimulation(state, sample, emission => emissions.push(emission));
+  if (tail) settleWispSimulation(state, emission => emissions.push(emission));
+  return { emissions, bounds: boundsForWispEmissions(emissions, style), maxParticles: state.maxParticles, steps: state.steps };
 }
 export function renderWispPrepared(target, prepared, style = {}) {
   const painter = toBrushPainter(target), opacity = clamp(finite(style.opacity)), recipe = wispRecipe(style);
@@ -202,3 +221,30 @@ export function renderWispPrepared(target, prepared, style = {}) {
   for (const emission of prepared.emissions) painter.polyline(emission.points, { color: snapshotColor(style, emission.newest), opacity: opacity * recipe.startOpacity * emission.newest.life / recipe.startLife, width, cap: "round", join: "round", composite: "lighter" });
 }
 export function renderWispPath(target, points, style, options) { const prepared = prepareWispPath(points, style, options); renderWispPrepared(target, prepared, style); return prepared; }
+
+/** Transient, append-only preview protocol consumed by DrawingRasterizer. */
+export function createWispLivePreview(drawable) {
+  const style = structuredClone(drawable.style), samples = [], state = createWispSimulation(style);
+  let delta = [];
+  const matches = next => next?.kind === "pathStroke" && next?.style?.brush === "wisp" && JSON.stringify(next.style) === JSON.stringify(style)
+    && Array.isArray(next.points) && next.points.length >= samples.length
+    && samples.every((sample, index) => JSON.stringify(next.points[index]) === JSON.stringify(sample));
+  return {
+    compatible: matches,
+    advance(next) {
+      if (!matches(next)) return false;
+      delta = [];
+      for (let index = samples.length; index < next.points.length; index += 1) {
+        const sample = structuredClone(next.points[index]); samples.push(sample);
+        advanceWispSimulation(state, sample, emission => delta.push(emission));
+      }
+      return delta.length > 0;
+    },
+    deltaBounds() { return boundsForWispEmissions(delta, style); },
+    paintDelta(target) { renderWispPrepared(target, { emissions: delta }, style); },
+    finishDelta() { delta = []; },
+    get activeParticleCount() { return state.curve.length; },
+    get consumedSampleCount() { return samples.length; },
+    dispose() { delta = []; samples.length = 0; state.curve.length = 0; }
+  };
+}
