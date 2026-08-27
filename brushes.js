@@ -3,6 +3,7 @@ import { measure } from "./perf.js";
 import { renderFiberPath } from "./fiber-brush.js";
 import { createWispLivePreview, measureWispPath, renderWispPath } from "./wisp-brush.js";
 import { BrushPainter, toBrushPainter } from "./brush-painter.js";
+import { contourEnergy, resolveBrushMaterial } from "./brush-material.js";
 
 const TAU = Math.PI * 2;
 const TEXTURE_DEBUG_FLAG = "__KALEIDOSCOPE_DEBUG_TEXTURE_BRUSH__";
@@ -36,7 +37,7 @@ export function colorAtPathPosition(style, position) {
   return `#${hexComponent(start.r + (end.r - start.r) * amount)}${hexComponent(start.g + (end.g - start.g) * amount)}${hexComponent(start.b + (end.b - start.b) * amount)}`;
 }
 
-function roundStamp(target, point, radius, options) { toBrushPainter(target).circle(point.x, point.y, radius, { color: options.color, opacity: options.opacity }); }
+function roundStamp(target, point, radius, options) { toBrushPainter(target).circle(point.x, point.y, radius, { color: options.color, opacity: options.opacity, composite: options.composite }); }
 
 function ribbonStamp(target, point, options) {
   const direction = options.tangent;
@@ -51,7 +52,7 @@ function ribbonStamp(target, point, options) {
 
 function calligraphyStamp(target, point, options) {
   const direction = options.tangent;
-  toBrushPainter(target).ellipse(point.x, point.y, options.size / 2, options.size * options.nibRatio / 2, Math.atan2(direction.y, direction.x), { color: options.color, opacity: options.opacity });
+  toBrushPainter(target).ellipse(point.x, point.y, options.size / 2, options.size * options.nibRatio / 2, Math.atan2(direction.y, direction.x), { color: options.color, opacity: options.opacity, composite: options.composite });
 }
 
 function sprayStamp(target, point, options) {
@@ -77,13 +78,22 @@ function textureStamp(target, point, options) {
   const angle = options.rotationMode === "followStroke" && options.tangent
     ? Math.atan2(options.tangent.y, options.tangent.x)
     : 0;
-  toBrushPainter(target).image(tip, point.x, point.y, tip.width * scale, tip.height * scale, angle, { opacity: options.opacity });
+  toBrushPainter(target).image(tip, point.x, point.y, tip.width * scale, tip.height * scale, angle, { opacity: options.opacity, composite: options.composite });
   return true;
 }
 
 function heldStampCount(point) {
   const count = Math.floor(Number(point?.holdCount) || 0);
   return Math.max(0, count);
+}
+
+function materialOptions(style, { points = [], index = 0, progress = 0, energy, profile, closed = false, colorSteps = 0 } = {}) {
+  if (Number(style.materialVersion) !== 1) return { color: colorAtPathPosition(style, progress), opacity: style.opacity };
+  const defaultProfile = style.brush === "texture" ? "texture" : ["pen", "ribbon", "spray"].includes(style.brush) ? "additive" : "pen";
+  return resolveBrushMaterial(style, {
+    energy: energy ?? contourEnergy(points, index, style.size, { closed }), progress,
+    profile: profile || defaultProfile, opacityScale: style.opacity, colorSteps
+  });
 }
 
 function immediateBrush(stamp) {
@@ -125,7 +135,14 @@ export function createImmediateBrushSession(style = {}) {
   const maxTangentDistance = Math.max(Number(style.size) * 6 || 0, 64);
   const spacing = Math.max(1, Number(style.size) * Math.min(1, Math.max(.05, Number(style.spacing) || .25)));
   const livePosition = () => Math.min(1, travelled / Math.max(Number(style.size) * 24, 1));
-  const optionsFor = tangent => ({ ...style, color: colorAtPathPosition(style, livePosition()), tangent, random });
+  const optionsFor = (tangent, energy = 0) => ({
+    ...style,
+    ...materialOptions(style, {
+      progress: livePosition(), energy,
+      colorSteps: style.brush === "texture" && Number(style.materialVersion) === 1 ? TEXTURE_GRADIENT_STEPS : 0
+    }),
+    tangent, random
+  });
   let delta = [];
   const target = new BrushPainter(instruction => delta.push(instruction));
   const paint = point => {
@@ -139,32 +156,36 @@ export function createImmediateBrushSession(style = {}) {
           let consumed = 0;
           while (distance - consumed >= textureUntilStamp) {
             consumed += textureUntilStamp; travelled += textureUntilStamp;
-            textureStamp(target, { x: previous.x + tangent.x * consumed, y: previous.y + tangent.y * consumed }, optionsFor(tangent)); textureUntilStamp = spacing;
+            textureStamp(target, { x: previous.x + tangent.x * consumed, y: previous.y + tangent.y * consumed }, optionsFor(tangent, contourEnergy([previous, point], 1, style.size))); textureUntilStamp = spacing;
           }
           const remainder = distance - consumed; travelled += remainder; textureUntilStamp -= remainder;
         } else textureUntilStamp = spacing;
       }
     } else if (style.brush === "spray") {
-      const options = optionsFor(tangent);
+      const energy = previous ? contourEnergy([previous, point], 1, style.size) : 0;
+      const options = optionsFor(tangent, energy);
       if (!previous) { sprayStamp(target, point, options); sprayUntilStamp = spraySpacing(options); }
       else {
         const dx = point.x - previous.x, dy = point.y - previous.y, distance = Math.hypot(dx, dy);
-        travelled += distance;
+        const sharedMaterial = Number(style.materialVersion) === 1;
+        if (!sharedMaterial) travelled += distance;
         if (distance > .0001) {
           const direction = { x: dx / distance, y: dy / distance };
           let consumed = 0;
           while (distance - consumed >= sprayUntilStamp) {
             consumed += sprayUntilStamp;
-            sprayStamp(target, { x: previous.x + direction.x * consumed, y: previous.y + direction.y * consumed }, optionsFor(direction));
+            const stampOptions = sharedMaterial ? { ...options, tangent: direction } : optionsFor(direction);
+            sprayStamp(target, { x: previous.x + direction.x * consumed, y: previous.y + direction.y * consumed }, stampOptions);
             sprayUntilStamp = spraySpacing(options);
           }
           sprayUntilStamp -= distance - consumed;
         }
+        if (sharedMaterial) travelled += distance;
       }
     } else {
-      const options = optionsFor(tangent);
+      const options = optionsFor(tangent, previous ? contourEnergy([previous, point], 1, style.size) : 0);
       if (!previous) brush.begin(target, point, options);
-      else { travelled += Math.hypot(point.x - previous.x, point.y - previous.y); brush.move(target, previous, point, optionsFor(tangent)); }
+      else { travelled += Math.hypot(point.x - previous.x, point.y - previous.y); brush.move(target, previous, point, options); }
     }
     previous = { x: point.x, y: point.y }; sampleCount += 1;
   };
@@ -207,6 +228,13 @@ function transientBounds(point, style) {
   return { left: point.x - pad, top: point.y - pad, right: point.x + pad, bottom: point.y + pad };
 }
 
+// Any explicit composite other than source-over needs the already committed
+// destination pixels. This is instruction metadata, not a brush identity:
+// future material profiles get the correct PaintSession behavior for free.
+function instructionsRequireBackdrop(instructions) {
+  return instructions.some(instruction => instruction?.composite && instruction.composite !== "source-over");
+}
+
 /**
  * Brush-neutral transient PaintSession renderer. It owns incremental brush
  * state and emits portable paint instructions; consumers only composite those
@@ -226,7 +254,7 @@ export function createPaintSessionRenderer(drawable) {
       const instructions = [];
       live.paintDelta(new BrushPainter(instruction => instructions.push(instruction)));
       live.finishDelta?.();
-      return instructions.length ? [{ instructions, bounds, requiresBackdrop: Boolean(live.requiresBackdrop) }] : [];
+      return instructions.length ? [{ instructions, bounds, requiresBackdrop: instructionsRequireBackdrop(instructions) }] : [];
     },
     beginFinish: () => live.beginFinish?.(),
     settle() {
@@ -236,7 +264,7 @@ export function createPaintSessionRenderer(drawable) {
       const instructions = [];
       live.paintDelta(new BrushPainter(instruction => instructions.push(instruction)));
       live.finishDelta?.();
-      return instructions.length ? [{ instructions, bounds, requiresBackdrop: Boolean(live.requiresBackdrop) }] : [];
+      return instructions.length ? [{ instructions, bounds, requiresBackdrop: instructionsRequireBackdrop(instructions) }] : [];
     },
     get isFinished() { return Boolean(live.isFinished); },
     get bounds() { return live.bounds; },
@@ -245,7 +273,7 @@ export function createPaintSessionRenderer(drawable) {
       if (!bounds) return [];
       const instructions = [];
       live.replay(new BrushPainter(instruction => instructions.push(instruction)));
-      return instructions.length ? [{ instructions, bounds, requiresBackdrop: Boolean(live.requiresBackdrop) }] : [];
+      return instructions.length ? [{ instructions, bounds, requiresBackdrop: instructionsRequireBackdrop(instructions) }] : [];
     },
     dispose: () => live.dispose?.()
   };
@@ -256,14 +284,14 @@ export function createPaintSessionRenderer(drawable) {
     const emit = (point, holdCount = 0) => {
       if (holdCount) immediate.hold(point, holdCount); else immediate.append(point);
       const instructions = immediate.takeDelta();
-      return instructions.length ? [{ instructions, bounds: transientBounds(point, drawable.style), requiresBackdrop: false }] : [];
+      return instructions.length ? [{ instructions, bounds: transientBounds(point, drawable.style), requiresBackdrop: instructionsRequireBackdrop(instructions) }] : [];
     };
     return {
       acceptsStyle,
       advance(next) {
         const batches = [];
-        for (let index = samples; index < next.points.length; index += 1) batches.push(...emit(next.points[index]));
         for (let index = 0; index < next.points.length; index += 1) {
+          if (index >= samples) batches.push(...emit(next.points[index]));
           const count = Math.max(0, Math.floor(Number(next.points[index].holdCount) || 0));
           if (count > (holds[index] || 0)) batches.push(...emit(next.points[index], count - (holds[index] || 0)));
           holds[index] = count;
@@ -290,7 +318,7 @@ export function createPaintSessionRenderer(drawable) {
     const pad = brushFootprint(next.style) + 2;
     const left = Math.min(...points.map(point => point.x)) - pad, right = Math.max(...points.map(point => point.x)) + pad;
     const top = Math.min(...points.map(point => point.y)) - pad, bottom = Math.max(...points.map(point => point.y)) + pad;
-    return [{ instructions, bounds: { left, top, right, bottom }, requiresBackdrop: false }];
+    return [{ instructions, bounds: { left, top, right, bottom }, requiresBackdrop: instructionsRequireBackdrop(instructions) }];
   };
   return {
     acceptsStyle,
@@ -353,7 +381,10 @@ export function canReplayBrushPath(points, style = {}) {
 }
 
 function hasNativePenStyle(options) {
-  return options.brush === "pen" && options.taper !== "sine" && options.colorMode !== "gradient";
+  // Material v1 Pen is additive even in solid mode. The legacy Canvas stroke
+  // shortcut cannot reproduce those instruction-level composite semantics,
+  // including generated contours replayed after restore.
+  return Number(options.materialVersion) !== 1 && options.brush === "pen" && options.taper !== "sine" && options.colorMode !== "gradient";
 }
 
 function canUseCompoundPen(options) {
@@ -424,6 +455,22 @@ export function replayBrushPath(ctx, points, options, { closed = false } = {}) {
     renderWispPath(ctx, points, options, { tail: options.preview !== true });
     return;
   }
+  // Versioned Spray/Texture must reconstruct the exact same chronological
+  // input stream as immediate painting: each sample, then its consumed holds.
+  // This preserves Spray's RNG sequence and Texture's segment-local material.
+  if (!closed && Number(options.materialVersion) === 1 && ["spray", "texture"].includes(options.brush)) {
+    const replay = createImmediateBrushSession(options);
+    if (replay) {
+      for (const point of points) {
+        replay.append(point);
+        replay.hold(point, heldStampCount(point));
+      }
+      const painter = toBrushPainter(ctx);
+      for (const instruction of replay.takeDelta()) painter.emit(instruction);
+      replay.end();
+      return;
+    }
+  }
   // A solid, untapered Pen has the same round-cap deposition as a native
   // Canvas stroke, without one save/path/fill per sampled point.
   if (hasNativePenStyle(options) && points.length > 1 && ctx instanceof BrushPainter) {
@@ -459,7 +506,13 @@ export function replayBrushPath(ctx, points, options, { closed = false } = {}) {
       const normalized = totalDistance ? position / totalDistance : 0;
       // Gradient texture strokes use at most 32 tint cache entries per tip.
       const quantized = Math.round(Math.min(1, Math.max(0, normalized)) * TEXTURE_GRADIENT_STEPS) / TEXTURE_GRADIENT_STEPS;
-      return { ...options, color: colorAtPathPosition(options, quantized), tangent };
+      const progress = Number(options.materialVersion) === 1
+        ? Math.min(1, position / Math.max(Number(options.size) * 24, 1))
+        : quantized;
+      return { ...options, ...materialOptions(options, {
+        points, index: Math.min(points.length - 1, Math.round(normalized * (points.length - 1))), progress,
+        profile: "texture", closed, colorSteps: Number(options.materialVersion) === 1 ? TEXTURE_GRADIENT_STEPS : 0
+      }), tangent };
     };
     let firstTangent = null;
     for (let index = 1; index < points.length; index += 1) {
@@ -515,18 +568,17 @@ export function replayBrushPath(ctx, points, options, { closed = false } = {}) {
   }
   const replayOptions = { ...options };
   if (replayOptions.brush === "spray") replayOptions.random = createSeededRandom(replayOptions.seed);
-  let previousTangent = null, sprayUntilStamp = 0;
+  let previousTangent = null, sprayUntilStamp = 0, materialTravelled = 0;
   const maxTangentDistance = Math.max(replayOptions.size * 6, 64);
   for (let index = 0; index < points.length; index += 1) {
     const point = points[index];
     const t = points.length === 1 ? 0.5 : index / (points.length - 1);
     const tangent = index ? tangentBetween(points[index - 1], point, previousTangent, maxTangentDistance) : null;
     if (tangent) previousTangent = tangent;
-    const stampOptions = {
-      ...replayOptions,
-      color: colorAtPathPosition(replayOptions, points.length === 1 ? 0 : t),
-      tangent
-    };
+    const progress = Number(replayOptions.materialVersion) === 1
+      ? Math.min(1, materialTravelled / Math.max(Number(replayOptions.size) * 24, 1))
+      : (points.length === 1 ? 0 : t);
+    const stampOptions = { ...replayOptions, ...materialOptions(replayOptions, { points, index, progress, closed }), tangent };
     if (replayOptions.brush === "pen") {
       // Geometric pen envelopes are based on normalized path position, never
       // pointer velocity or source-space segment length.
@@ -558,5 +610,8 @@ export function replayBrushPath(ctx, points, options, { closed = false } = {}) {
         sprayStamp(ctx, point, stampOptions);
       }
     }
+    // Match live immediate ordering: a sample receives the distance accrued
+    // before its incoming segment; that segment feeds the following sample.
+    if (index) materialTravelled += Math.hypot(point.x - points[index - 1].x, point.y - points[index - 1].y);
   }
 }

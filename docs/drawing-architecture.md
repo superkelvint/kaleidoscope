@@ -33,6 +33,17 @@ never read rasterizer internals.
 brush and Fiber recipes are backend-independent material/path behavior, not a
 permanent Canvas2D architectural constraint.
 
+## Immediate paint completion
+
+Normal immediate-paint completion is a pixel promotion, not a replay. Mouseup,
+Wisp release-tail completion, starting another stroke, and ordinary session
+commits retain the already-visible immediate raster and promote it with
+canvas-to-canvas pixel copies only. Durable paint recipes and `RenderIndex`
+bounds are saved at that point, while sparse tiles become lazy/stale caches.
+Replay is reserved for unavailable or invalid derived material (restore,
+undo/replace/clear, resolution changes, and texture recovery), never for a
+normal session completion.
+
 ## Non-negotiable behavior
 
 - A source-frame change is not renderer state and must retain feedback.

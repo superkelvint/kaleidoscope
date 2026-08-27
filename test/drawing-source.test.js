@@ -59,6 +59,15 @@ test("paint sessions deposit before completion, persist typed records, and gate 
   assert.equal(source.getDrawable(generator), null);
 }));
 
+test("additive material paint sessions seed their immediate raster from committed artwork", () => withSource(() => {
+  const source = new DrawingSource({ width: 100, height: 100 });
+  source.commitDrawable(drawable());
+  const additive = { ...drawable(), style: { ...drawable().style, materialVersion: 1, colorMode: "gradient", startColor: "#ff0000", endColor: "#0000ff" } };
+  source.beginPaintSession(additive);
+  assert.equal(source.rasterizer.immediateIsComposite, true);
+  assert.ok(source.rasterizer.immediateCtx.calls.some(([name]) => name === "drawImage"), "committed material is copied before lighter deposition");
+}));
+
 test("a compacted active Pen path reconciles its replacement prefix", () => withSource(() => {
   const source = new DrawingSource({ width: 2048, height: 100 });
   const points = Array.from({ length: 512 }, (_, index) => ({ x: index, y: 30 }));
@@ -86,12 +95,12 @@ test("a compacted active Spray path remains a spray during reconciliation", () =
   assert.ok(particles >= 3 && particles % 3 === 0, "every spaced Spray burst emits its configured particle population after compaction");
 }));
 
-test("a Spray hold update retains earlier completed sprays after it reconciles", () => withSource(() => {
+test("a Spray hold update retains earlier completed sprays after pixel promotion", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
   const spray = points => ({ ...drawable(), points, style: { ...drawable().style, brush: "spray", density: 3, particleSize: 1 } });
   const first = source.beginPaintSession(spray([{ x: 20, y: 20 }]));
   assert.ok(source.finishPaintSession(first));
-  assert.equal(source.committedDirty, true, "a completed immediate stroke is queued for durable composition");
+  assert.equal(source.committedDirty, false, "a completed immediate stroke promotes its visible pixels");
 
   const second = source.beginPaintSession(spray([{ x: 70, y: 70 }]));
   const cached = source.tile(0, 0);
@@ -102,6 +111,55 @@ test("a Spray hold update retains earlier completed sprays after it reconciles",
   assert.equal(source.operationCount, 1, "reconciling the active hold does not discard the completed spray");
   assert.equal(immediate.calls.some(([name]) => name === "clearRect"), false, "a timed hold increment stays on Spray's incremental particle stream");
   assert.equal(immediate.calls.filter(([name]) => name === "arc").length, 3, "the timed hold emits Spray's configured particle population");
+}));
+
+test("immediate completion promotes pixels without replaying brush or committed history", () => withSource(() => {
+  const source = new DrawingSource({ width: 100, height: 100 });
+  // Keep a tile resident so eager tile appends would be observable.
+  source.tile(0, 0);
+  let replays = 0, cachedPaints = 0, compositions = 0;
+  const paintOperation = source.paintOperation, paintCachedOperation = source.paintCachedOperation, composeCommittedMaterial = source.composeCommittedMaterial;
+  source.paintOperation = (...args) => { replays += 1; return paintOperation(...args); };
+  source.paintCachedOperation = (...args) => { cachedPaints += 1; return paintCachedOperation(...args); };
+  source.composeCommittedMaterial = (...args) => { compositions += 1; return composeCommittedMaterial(...args); };
+
+  const session = source.beginPaintSession(drawable());
+  replays = cachedPaints = compositions = 0;
+  assert.ok(source.finishPaintSession(session));
+  assert.deepEqual({ replays, cachedPaints, compositions }, { replays: 0, cachedPaints: 0, compositions: 0 });
+  assert.equal(source.committedDirty, false);
+}));
+
+test("overlapping immediate completions retain their composite without replay", () => withSource(() => {
+  const source = new DrawingSource({ width: 100, height: 100 });
+  let replays = 0, cachedPaints = 0, compositions = 0;
+  const paintOperation = source.paintOperation, paintCachedOperation = source.paintCachedOperation, composeCommittedMaterial = source.composeCommittedMaterial;
+  source.paintOperation = (...args) => { replays += 1; return paintOperation(...args); };
+  source.paintCachedOperation = (...args) => { cachedPaints += 1; return paintCachedOperation(...args); };
+  source.composeCommittedMaterial = (...args) => { compositions += 1; return composeCommittedMaterial(...args); };
+  const a = source.beginPaintSession(drawable());
+  const b = source.beginPaintSession({ ...drawable(), points: [{ x: 60, y: 60 }, { x: 70, y: 70 }] });
+  replays = cachedPaints = compositions = 0;
+  source.finishPaintSession(a);
+  assert.equal(source.rasterizer.immediateIsComposite, true, "the remaining session keeps the exact visible composite");
+  source.finishPaintSession(b);
+  assert.equal(source.rasterizer.hasImmediatePixels, false, "the final completion promotes that composite to committed material");
+  assert.deepEqual({ replays, cachedPaints, compositions }, { replays: 0, cachedPaints: 0, compositions: 0 });
+}));
+
+test("an immediate commit leaves existing sparse tiles stale until requested", () => withSource(() => {
+  const source = new DrawingSource({ width: 100, height: 100 });
+  const cached = source.tile(0, 0);
+  let cachedPaints = 0;
+  const paintCachedOperation = source.paintCachedOperation;
+  source.paintCachedOperation = (...args) => { cachedPaints += 1; return paintCachedOperation(...args); };
+  const session = source.beginPaintSession(drawable());
+  source.finishPaintSession(session);
+  assert.equal(cachedPaints, 0, "completion does not update a resident tile");
+  assert.notEqual(cached.generation, source.rasterizer.committedRasterGeneration, "the resident tile is explicitly stale");
+  source.tile(0, 0);
+  assert.ok(cachedPaints > 0, "the later tile lookup performs the allowed lazy reconstruction");
+  assert.equal(cached.generation, source.rasterizer.committedRasterGeneration);
 }));
 
 test("an empty Wisp opens a session and commits only after its async release tail", async () => {
@@ -118,6 +176,24 @@ test("an empty Wisp opens a session and commits only after its async release tai
     for (let index = 0; index < 10000 && queued.length; index += 1) queued.shift()(index);
     assert.equal(source.hasPaintSessions(), false);
     assert.equal(source.operationCount, 1);
+  } finally { globalThis.OffscreenCanvas = previous; delete globalThis.requestAnimationFrame; }
+});
+
+test("Wisp release-tail completion promotes pixels without replay", async () => {
+  const previous = globalThis.OffscreenCanvas, queued = [];
+  globalThis.OffscreenCanvas = FakeOffscreenCanvas;
+  globalThis.requestAnimationFrame = callback => { queued.push(callback); return queued.length; };
+  try {
+    const source = new DrawingSource({ width: 100, height: 100 });
+    let replays = 0, cachedPaints = 0, compositions = 0;
+    const paintOperation = source.paintOperation, paintCachedOperation = source.paintCachedOperation, composeCommittedMaterial = source.composeCommittedMaterial;
+    source.paintOperation = (...args) => { replays += 1; return paintOperation(...args); };
+    source.paintCachedOperation = (...args) => { cachedPaints += 1; return paintCachedOperation(...args); };
+    source.composeCommittedMaterial = (...args) => { compositions += 1; return composeCommittedMaterial(...args); };
+    const session = source.beginPaintSession(wispDrawable());
+    assert.ok(source.finishPaintSession(session));
+    for (let index = 0; index < 10000 && queued.length; index += 1) queued.shift()(index);
+    assert.deepEqual({ replays, cachedPaints, compositions }, { replays: 0, cachedPaints: 0, compositions: 0 });
   } finally { globalThis.OffscreenCanvas = previous; delete globalThis.requestAnimationFrame; }
 });
 

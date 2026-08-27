@@ -39,6 +39,15 @@ test("Fiber emits backend-neutral polyline material instructions", () => {
   assert.ok(instructions.some(instruction => instruction.composite === "lighter"), "hot cores retain additive compositing");
 });
 
+test("Fiber materialVersion 1 preserves simulated paths and widths", () => {
+  const legacy = [], shared = [];
+  const v2 = { ...style, version: 2, fibers: .4, gravity: 20, branching: 0, curl: 0 };
+  renderFiberPath(new BrushPainter(item => legacy.push(item)), path, v2);
+  renderFiberPath(new BrushPainter(item => shared.push(item)), path, { ...v2, materialVersion: 1 });
+  assert.deepEqual(shared.map(({ points, width, cap, composite }) => ({ points, width, cap, composite })), legacy.map(({ points, width, cap, composite }) => ({ points, width, cap, composite })));
+  assert.notDeepEqual(shared.map(item => item.color), legacy.map(item => item.color));
+});
+
 test("Fiber solid mode honors the selected solid color over retained gradient swatches", () => {
   const context = new Context();
   renderFiberPath(context, path, { ...style, colorMode: "solid", color: "#ff0000", startColor: "#ffffff", endColor: "#0044ff" });

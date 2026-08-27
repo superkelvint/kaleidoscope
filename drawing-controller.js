@@ -34,7 +34,7 @@ export class DrawingController {
     const s = this.settings, gradient = s.colorMode === "gradient";
     // Make a saved style self-consistent. This is deliberately redundant with
     // brush rendering: no solid stroke may inherit stale endpoint swatches.
-    const style = { brush: s.brush, version: s.brush === "fiber" || s.brush === "hair" || s.brush === "wisp" ? 2 : undefined, color: s.color, colorMode: s.colorMode, startColor: gradient ? s.gradientStartColor : s.color, endColor: gradient ? s.gradientEndColor : s.color, size: Number(s.size), opacity: Number(s.opacity), lines: Number(s.lines), span: Number(s.span), nibRatio: Number(s.nibRatio), density: Number(s.density), particleSize: Number(s.particleSize), textureId: s.textureId, spacing: Number(s.textureSpacing), rotationMode: s.textureRotationMode, assistLevel: Number(s.assistLevel), fibers: Number(s.fibers), gravity: Number(s.gravity), branching: Number(s.branching), curl: Number(s.curl), spread: Number(s.spread), wispiness: Number(s.wispiness), taper: "none", seed: Math.floor(Math.random() * 0x100000000) };
+    const style = { brush: s.brush, version: s.brush === "fiber" || s.brush === "hair" || s.brush === "wisp" ? 2 : undefined, materialVersion: 1, color: s.color, colorMode: s.colorMode, startColor: gradient ? s.gradientStartColor : s.color, endColor: gradient ? s.gradientEndColor : s.color, size: Number(s.size), opacity: Number(s.opacity), lines: Number(s.lines), span: Number(s.span), nibRatio: Number(s.nibRatio), density: Number(s.density), particleSize: Number(s.particleSize), textureId: s.textureId, spacing: Number(s.textureSpacing), rotationMode: s.textureRotationMode, assistLevel: Number(s.assistLevel), fibers: Number(s.fibers), gravity: Number(s.gravity), branching: Number(s.branching), curl: Number(s.curl), spread: Number(s.spread), wispiness: Number(s.wispiness), taper: "none", seed: Math.floor(Math.random() * 0x100000000) };
     return s.brush === "wisp" ? { ...style, energy: Number(s.wispEnergy), momentum: Number(s.wispMomentum), turbulence: Number(s.wispTurbulence), persistence: Number(s.wispPersistence), density: Number(s.wispDensity) } : style;
   }
   point(event) { return { x: event.clientX, y: event.clientY }; }
@@ -54,9 +54,12 @@ export class DrawingController {
       current.style.wispCenterX = sourceCenter.x;
       current.style.wispCenterY = sourceCenter.y;
     }
+    // Smart gestures and a Shift-constrained gesture replace their geometry
+    // at completion. Keep those preview-only until that final path exists.
+    current.deferredPaint = this.settings.tool === "smart" || Boolean(event.shiftKey);
     this.current = current;
     const drawable = { kind: "pathStroke", points: current.points.map(clone), style: clone(current.style) };
-    if (this.source.beginPaintSession) current.paintSessionId = this.source.beginPaintSession(drawable);
+    if (!current.deferredPaint && this.source.beginPaintSession) current.paintSessionId = this.source.beginPaintSession(drawable);
     this.startContinuous();
   }
   move(event) {
@@ -84,10 +87,14 @@ export class DrawingController {
       // the gesture without manufacturing an off-clock velocity impulse.
     }
     else if (!event.shiftKey) this.capture(c.last, this.interactionPoint(event, c), c);
-    if (c.style.brush !== "wisp") this.compactPoints(c.points);
     const drawable = { kind: "pathStroke", points: c.points.map(clone), style: clone(c.style) };
     if (c.paintSessionId) { this.source.updatePaintSession(c.paintSessionId, drawable); this.source.finishPaintSession(c.paintSessionId); }
-    else { this.source.previewDrawable(null); if (canReplayBrushPath(drawable.points, drawable.style)) this.source.commitDrawable(drawable); }
+    else {
+      this.source.previewDrawable(null);
+      if (canReplayBrushPath(drawable.points, drawable.style) && this.source.beginPaintSession) {
+        const id = this.source.beginPaintSession(drawable); if (id) this.source.finishPaintSession(id);
+      } else if (canReplayBrushPath(drawable.points, drawable.style)) this.source.commitDrawable(drawable);
+    }
     this.stopContinuous(); this.current = null;
   }
   cancel(event) {
@@ -96,7 +103,7 @@ export class DrawingController {
     // Immediate paint has no rollback. A cancellation completes the samples
     // already deposited, which also releases the generator-mutation gate.
     if (this.current?.paintSessionId) {
-      const c = this.current; if (c.style.brush !== "wisp") this.compactPoints(c.points);
+      const c = this.current;
       const drawable = { kind: "pathStroke", points: c.points.map(clone), style: clone(c.style) };
       this.source.updatePaintSession(c.paintSessionId, drawable); this.source.finishPaintSession(c.paintSessionId);
     }

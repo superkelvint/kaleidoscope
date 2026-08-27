@@ -1,4 +1,5 @@
 import { toBrushPainter } from "./brush-painter.js";
+import { interpolateHcl, resolveBrushMaterial, wispVelocityEnergy } from "./brush-material.js";
 
 /*
  * Wisp is a source-faithful procedural paint brush inspired by WeaveSilk.
@@ -47,17 +48,172 @@ function gradientDot(hash, x, y, z) {
     case 10: return (y - z); default: return (-y - z);
   }
 }
+// Wisp's normal recipe is fixed at 8 octaves / .65 fallout.
+// Precompute these once instead of rebuilding them for every particle step.
+const WISP_OCTAVE_FREQUENCIES = Object.freeze([
+  1, 2, 4, 8, 16, 32, 64, 128
+]);
+
+const WISP_OCTAVE_WEIGHTS = Object.freeze((() => {
+  const weights = [];
+  let effect = 1;
+
+  for (let index = 0; index < 8; index += 1) {
+    effect *= .65;
+    weights.push(effect);
+  }
+
+  return weights;
+})());
+
 export function wispNoise3d(x, y, z) {
-  const x0 = Math.floor(x), y0 = Math.floor(y), z0 = Math.floor(z), dx = x - x0, dy = y - y0, dz = z - z0;
-  const corner = (ox, oy, oz) => gradientDot(gradientHash(x0 + ox, y0 + oy, z0 + oz), dx - ox, dy - oy, dz - oz);
-  const u = fade(dx), v = fade(dy), w = fade(dz);
-  const lower = mix(mix(corner(0, 0, 0), corner(1, 0, 0), u), mix(corner(0, 1, 0), corner(1, 1, 0), u), v);
-  const upper = mix(mix(corner(0, 0, 1), corner(1, 0, 1), u), mix(corner(0, 1, 1), corner(1, 1, 1), u), v);
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const z0 = Math.floor(z);
+
+  const dx = x - x0;
+  const dy = y - y0;
+  const dz = z - z0;
+
+  // Precompute the offset versions instead of recalculating them in each
+  // corner call.
+  const dx1 = dx - 1;
+  const dy1 = dy - 1;
+  const dz1 = dz - 1;
+
+  // Inline all eight lattice corners. This avoids allocating/calling the
+  // `corner` closure for every noise evaluation.
+  const c000 = gradientDot(
+    gradientHash(x0, y0, z0),
+    dx, dy, dz
+  );
+
+  const c100 = gradientDot(
+    gradientHash(x0 + 1, y0, z0),
+    dx1, dy, dz
+  );
+
+  const c010 = gradientDot(
+    gradientHash(x0, y0 + 1, z0),
+    dx, dy1, dz
+  );
+
+  const c110 = gradientDot(
+    gradientHash(x0 + 1, y0 + 1, z0),
+    dx1, dy1, dz
+  );
+
+  const c001 = gradientDot(
+    gradientHash(x0, y0, z0 + 1),
+    dx, dy, dz1
+  );
+
+  const c101 = gradientDot(
+    gradientHash(x0 + 1, y0, z0 + 1),
+    dx1, dy, dz1
+  );
+
+  const c011 = gradientDot(
+    gradientHash(x0, y0 + 1, z0 + 1),
+    dx, dy1, dz1
+  );
+
+  const c111 = gradientDot(
+    gradientHash(x0 + 1, y0 + 1, z0 + 1),
+    dx1, dy1, dz1
+  );
+
+  const u = fade(dx);
+  const v = fade(dy);
+  const w = fade(dz);
+
+  const lower = mix(
+    mix(c000, c100, u),
+    mix(c010, c110, u),
+    v
+  );
+
+  const upper = mix(
+    mix(c001, c101, u),
+    mix(c011, c111, u),
+    v
+  );
+
   return mix(lower, upper, w);
 }
+
 export function wispNoise(x, y, z, octaves = 8, fallout = .65) {
-  let effect = 1, frequency = 1, sum = 0;
-  for (let index = 0; index < octaves; index += 1) { effect *= fallout; sum += effect * (1 + wispNoise3d(frequency * x, frequency * y, frequency * z)) / 2; frequency *= 2; }
+  // Hot path: this is what Wisp itself uses.
+  //
+  // Keep the individual += operations rather than turning this into one giant
+  // expression so floating-point accumulation follows the same order as the
+  // original implementation.
+  if (octaves === 8 && fallout === .65) {
+    let sum = 0;
+
+    let frequency = WISP_OCTAVE_FREQUENCIES[0];
+    sum += WISP_OCTAVE_WEIGHTS[0]
+      * (1 + wispNoise3d(frequency * x, frequency * y, frequency * z))
+      / 2;
+
+    frequency = WISP_OCTAVE_FREQUENCIES[1];
+    sum += WISP_OCTAVE_WEIGHTS[1]
+      * (1 + wispNoise3d(frequency * x, frequency * y, frequency * z))
+      / 2;
+
+    frequency = WISP_OCTAVE_FREQUENCIES[2];
+    sum += WISP_OCTAVE_WEIGHTS[2]
+      * (1 + wispNoise3d(frequency * x, frequency * y, frequency * z))
+      / 2;
+
+    frequency = WISP_OCTAVE_FREQUENCIES[3];
+    sum += WISP_OCTAVE_WEIGHTS[3]
+      * (1 + wispNoise3d(frequency * x, frequency * y, frequency * z))
+      / 2;
+
+    frequency = WISP_OCTAVE_FREQUENCIES[4];
+    sum += WISP_OCTAVE_WEIGHTS[4]
+      * (1 + wispNoise3d(frequency * x, frequency * y, frequency * z))
+      / 2;
+
+    frequency = WISP_OCTAVE_FREQUENCIES[5];
+    sum += WISP_OCTAVE_WEIGHTS[5]
+      * (1 + wispNoise3d(frequency * x, frequency * y, frequency * z))
+      / 2;
+
+    frequency = WISP_OCTAVE_FREQUENCIES[6];
+    sum += WISP_OCTAVE_WEIGHTS[6]
+      * (1 + wispNoise3d(frequency * x, frequency * y, frequency * z))
+      / 2;
+
+    frequency = WISP_OCTAVE_FREQUENCIES[7];
+    sum += WISP_OCTAVE_WEIGHTS[7]
+      * (1 + wispNoise3d(frequency * x, frequency * y, frequency * z))
+      / 2;
+
+    return sum;
+  }
+
+  // Preserve the exported helper's existing behavior for tests/debugging or
+  // any future recipe that uses non-default octave/fallout values.
+  let effect = 1;
+  let frequency = 1;
+  let sum = 0;
+
+  for (let index = 0; index < octaves; index += 1) {
+    effect *= fallout;
+
+    sum += effect
+      * (1 + wispNoise3d(
+        frequency * x,
+        frequency * y,
+        frequency * z
+      ))
+      / 2;
+
+    frequency *= 2;
+  }
+
   return sum;
 }
 
@@ -109,53 +265,8 @@ const unitsPerPixel = style => {
   const value = Number(style?.wispUnitsPerPixel);
   return Number.isFinite(value) && value > 0 ? value : 1;
 };
-function rgb(color) { const match = /^#([\da-f]{3}|[\da-f]{6})$/i.exec(String(color || "")); if (!match) return [255, 255, 255]; const value = match[1].length === 3 ? [...match[1]].map(x => x + x).join("") : match[1]; return [0, 2, 4].map(index => Number.parseInt(value.slice(index, index + 2), 16)); }
-const linearRgb = value => value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4;
-const displayRgb = value => 255 * (value <= .0031308 ? 12.92 * value : 1.055 * value ** (1 / 2.4) - .055);
-const labEpsilon = 216 / 24389, labKappa = 24389 / 27;
-const labForward = value => value > labEpsilon ? Math.cbrt(value) : (labKappa * value + 16) / 116;
-const labReverse = value => value ** 3 > labEpsilon ? value ** 3 : (116 * value - 16) / labKappa;
-function rgbToHcl(color) {
-  const source = rgb(color), [red, green, blue] = source.map(value => linearRgb(value / 255));
-  const x = labForward((.4124564 * red + .3575761 * green + .1804375 * blue) / .95047);
-  const y = labForward(.2126729 * red + .7151522 * green + .072175 * blue);
-  const z = labForward((.0193339 * red + .119192 * green + .9503041 * blue) / 1.08883);
-  const a = 500 * (x - y), b = 200 * (y - z), hue = Math.atan2(b, a) * 180 / Math.PI;
-  const c = Math.hypot(a, b);
-  // d3's neutral Lab values have an undefined hue. Preserve that behavior
-  // explicitly instead of letting tiny matrix-rounding residuals choose an
-  // arbitrary hue for white, black, or gray input.
-  return { h: source[0] === source[1] && source[1] === source[2] ? NaN : (hue < 0 ? hue + 360 : hue), c: source[0] === source[1] && source[1] === source[2] ? 0 : c, l: 116 * y - 16 };
-}
-function hclToRgb({ h, c, l }) {
-  const radians = h * Math.PI / 180, a = Math.cos(radians) * c, b = Math.sin(radians) * c;
-  const y = (l + 16) / 116, x = y + a / 500, z = y - b / 200;
-  const X = .95047 * labReverse(x), Y = labReverse(y), Z = 1.08883 * labReverse(z);
-  const channels = [3.2404542 * X - 1.5371385 * Y - .4985314 * Z, -.969266 * X + 1.8760108 * Y + .041556 * Z, .0556434 * X - .2040259 * Y + 1.0572252 * Z];
-  return `rgb(${channels.map(channel => Math.round(Math.min(255, Math.max(0, displayRgb(channel)))).toString()).join(",")})`;
-}
-/** d3.interpolateHcl-compatible shortest-hue LCh interpolation for Wisp. */
-export function interpolateWispHcl(startColor, endColor, amount) {
-  const start = rgbToHcl(startColor), end = rgbToHcl(endColor), t = clamp(amount);
-  let startHue = start.h, endHue = end.h;
-  if (!Number.isFinite(startHue)) startHue = endHue;
-  if (!Number.isFinite(endHue)) endHue = startHue;
-  if (!Number.isFinite(startHue)) startHue = endHue = 0;
-  let hueDelta = endHue - startHue;
-  if (hueDelta > 180) hueDelta -= 360;
-  else if (hueDelta < -180) hueDelta += 360;
-  return hclToRgb({ h: startHue + hueDelta * t, c: start.c + (end.c - start.c) * t, l: start.l + (end.l - start.l) * t });
-}
-function snapshotColor(style, newest) {
-  if (style.colorMode !== "gradient") return style.color || "#ffffff";
-  const velocity = Math.hypot(newest.inputVx, newest.inputVy) / unitsPerPixel(style), exponent = 1.5;
-  // d3.scale.pow() transforms the domain values before normalizing.  Clamp
-  // the non-negative input before exponentiation so stationary holds stay at
-  // the low color instead of producing NaN from a fractional negative power.
-  const low = 10 ** exponent, high = 30 ** exponent, transformed = Math.max(0, velocity) ** exponent;
-  const t = clamp((transformed - low) / (high - low));
-  return interpolateWispHcl(style.startColor || style.color, style.endColor || style.color, t);
-}
+/** Backward-compatible export; the implementation now belongs to materials. */
+export const interpolateWispHcl = interpolateHcl;
 function writePoint(points, index, x, y) {
   const point = points[index] || (points[index] = {});
   point.x = x; point.y = y;
@@ -395,7 +506,10 @@ export function prepareWispPath(points, style = {}, { tail = true } = {}) {
 export function renderWispPrepared(target, prepared, style = {}) {
   const painter = toBrushPainter(target), opacity = clamp(finite(style.opacity)), recipe = wispRecipe(style);
   const width = Math.max(.2, finite(style.size) / 8) * unitsPerPixel(style);
-  for (const emission of prepared.emissions) painter.polyline(emission.points, { color: snapshotColor(style, emission.newest), opacity: opacity * recipe.startOpacity * emission.newest.life / recipe.startLife, width, cap: "round", join: "round", composite: "lighter" });
+  for (const emission of prepared.emissions) {
+    const material = resolveBrushMaterial(style, { energy: wispVelocityEnergy(emission.newest, unitsPerPixel(style)), opacityScale: opacity * recipe.startOpacity * emission.newest.life / recipe.startLife, profile: "wisp" });
+    painter.polyline(emission.points, { ...material, width, cap: "round", join: "round" });
+  }
 }
 /**
  * Thin rendering consumer over simulateWispPath(), deliberately without a
@@ -410,7 +524,8 @@ export function renderWispPath(target, points, style = {}, options = {}) {
   return simulateWispPath(points, style, {
     ...options,
     onEmission(emission) {
-      painter.polyline(emission.points, { color: snapshotColor(style, emission.newest), opacity: opacity * recipe.startOpacity * emission.newest.life / recipe.startLife, width, cap: "round", join: "round", composite: "lighter" });
+      const material = resolveBrushMaterial(style, { energy: wispVelocityEnergy(emission.newest, unitsPerPixel(style)), opacityScale: opacity * recipe.startOpacity * emission.newest.life / recipe.startLife, profile: "wisp" });
+      painter.polyline(emission.points, { ...material, width, cap: "round", join: "round" });
       options.onEmission?.(emission);
     }
   });

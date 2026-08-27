@@ -1,405 +1,471 @@
 # Kaleidoscope agent guide
 
 Use this file as a map, not an encyclopedia. Keep durable architecture,
-invariants, navigation hints, and verification rules here; put long explanations
-and task-specific plans elsewhere.
+invariants, navigation hints, and verification rules here. Put detailed module
+notes and task-specific plans elsewhere.
 
 ## Start here
 
-| Task                                  | Read first                                     |
-| ------------------------------------- | ---------------------------------------------- |
-| UI/control wiring                     | `app.js`, then the relevant HTML               |
-| Rendering, animation, feedback, bloom | `render.js`                                    |
-| Bitmap loading/persistence            | `bitmap-source.js`                             |
-| Drawing durable content               | `drawing-document.js`                          |
-| Drawing pixels/caches                 | `drawing-source.js` (`DrawingRasterizer`)      |
-| Basic drawing source                  | `drawing-source.js`, then `app.js`             |
-| BrushPainter raster backend           | `brushes.js`                                   |
-| Assisted Fiber material rendering     | `fiber-brush.js`, then `brushes.js`            |
-| Brush texture assets/caching           | `brush-textures.js`, then `brushes.js`         |
-| Development performance telemetry      | `perf.js`                                      |
-| Local motif symmetry mapping          | `local-motif.js`                               |
-| Drawing pointer mapping               | `drawing-mapping.js`                           |
-| Drawing interaction/tools             | `drawing-controller.js`                        |
-| Smart gesture recognition             | `gesture-interpreter.js`                       |
-| Arc/Bezier construction sampling      | `constructed-strokes.js`                       |
-| Procedural drawable geometry          | `drawable-path.js`, then `generators.js`       |
-| Global wallpaper symmetry             | `global-wallpaper.js`                          |
-| New source type                       | source contract below, then `bitmap-source.js` |
-| Canvas gestures                       | `app.js`; transforms stay in `Renderer`        |
+| Task                                  | Read first                               |
+| ------------------------------------- | ---------------------------------------- |
+| UI/control wiring                     | `app.js`, then relevant HTML             |
+| Rendering, animation, feedback, bloom | `render.js`                              |
+| Bitmap source/persistence             | `bitmap-source.js`                       |
+| Drawing durable state / undo          | `drawing-document.js`                    |
+| Drawing raster/caches/PaintSessions   | `drawing-source.js`                      |
+| Drawing pointer/tool lifecycle        | `drawing-controller.js`                  |
+| Screen-to-source drawing mapping      | `drawing-mapping.js`                     |
+| Brush mechanics / replay              | `brushes.js`, `brush-painter.js`         |
+| Wisp                                  | `wisp-brush.js`                          |
+| Fiber/Hair                            | `fiber-brush.js`, then `brushes.js`      |
+| Texture brush assets                  | `brush-textures.js`                      |
+| Generator geometry                    | `drawable-path.js`, then `generators.js` |
+| Local motif symmetry                  | `local-motif.js`                         |
+| Global wallpaper symmetry             | `global-wallpaper.js`                    |
+| Performance telemetry                 | `perf.js`                                |
 
-Read the owning module before broad repository greps. After that, prefer targeted
-symbol searches.
+Read the owning module before broad repository greps. Prefer targeted symbol
+searches once ownership is clear.
 
-## Architecture
+For drawing changes that cross boundaries, read
+`docs/drawing-architecture.md`.
 
-### `render.js` — rendering core
+---
 
-Exports `Renderer` and exclusively owns WebGL2: shaders/GPU resources, source
-texture uploads, resizing, local/global symmetry rendering, feedback, bloom,
-animation/motion, timeline state/rebuilds, render loop, and pan/zoom transforms.
+## Core architecture
 
-It must NOT query the DOM, use browser persistence, decode files, or branch on
-specific source types.
+### Renderer
 
-Use public methods: `setSource`, `getState`, `restoreState`, `updateState`,
-`updatePostProcess`, `updateMotion`, `seekToTime`, `panBy`, `zoomBy`,
-`beginInteraction`, `endInteraction`. Persist `getState()` output, never
-renderer internals.
+`render.js` owns GPU presentation:
 
-### `bitmap-source.js` — bitmap source
+- WebGL resources and source texture uploads
+- local motif and global wallpaper rendering
+- animation, feedback, bloom, timeline
+- pan/zoom and presentation transforms
 
-Exports `BitmapSource`; owns validation/decoding, current image
-pixels/dimensions, monotonic frame revision, IndexedDB persistence, and legacy
-source-image migration. It must remain WebGL-free.
+It must not know about specific source implementations.
 
-### Drawing pipeline
+**Do not add source-type branches to `Renderer`.**
 
-The drawing path is `controller → immutable drawable → document → ChangeSet →
-rasterizer → source frame → renderer`. Read
-[`docs/drawing-architecture.md`](docs/drawing-architecture.md) before changing
-more than one drawing boundary.
+### Sources
 
-`drawing-document.js` exports `DrawingDocument`, the durable semantic truth:
-schema-v3 `PaintOperation` / `GeneratorOperation` records with stable IDs, background, validation, single-level undo,
-replace-by-ID, destructive clear, and persistence. It owns no Canvas, renderer,
-time, texture, or cache state. Every mutation returns an explicit ChangeSet;
-never make the rasterizer infer changes by comparing snapshots.
+Renderer sources expose:
 
-`drawing-source.js` exports `DrawingSource` and `DrawingRasterizer`.
-`DrawingSource` is the renderer-facing facade: frame/view/time/preview plus
-document mutation and query APIs. UI code must use `getDrawable`,
-`findLatestDrawable`, `canUndo`, and `operationCount`; it must never inspect operation
-arrays, tiles, canvases, or atlas state.
-
-`DrawingRasterizer` owns all derived raster state: prepared drawable geometry
-and bounds keyed by operation ID, time-dependent derivation/evaluation, a
-RenderIndex (operation ID → z-order/bounds/dependencies and tile → relevant
-operation IDs), sparse tiles, fixed periodic material, preview, texture readiness,
-invalidation, and frame revision. It remains WebGL-free and has no pointer,
-renderer mapping, tool, persistence, or DOM UI state. `DrawingSource.setTime`
-only forwards project time; it does not derive paths.
-
-Static-prefix caching and high-zoom path replay preserve current output, but are
-implementation strategies—not drawing architecture. The durable requirements
-are z-order correctness, sharp magnification, and no static-work amplification
-on future animation ticks.
-
-Missing texture assets are loaded through `brushTextureCatalog`; when a texture
-becomes ready, invalidate the affected raster-derived state and rerender.
-`onFrameChange` only requests presentation—it does not turn a source-pixel
-update into renderer state.
-
-### Drawing mapping and controller
-
-`local-motif.js` owns the CPU local motif transform and its GLSL counterpart.
-`drawing-mapping.js` owns frozen screen-to-source mapping, including wallpaper,
-motif, transforms, aspect correction, and Canvas Y inversion.
-`drawing-controller.js` owns pointer lifecycle, tools, constraints, previews,
-and immutable drawable styles; it commits `pathStroke` drawables to
-`DrawingSource`.
-
-`gesture-interpreter.js` is pure display-space smart-gesture recognition and
-canonical gesture sampling. `constructed-strokes.js` is pure display-space arc
-and cubic Bézier sampling. `DrawingController` freezes the renderer mapping at
-gesture start and maps their resulting points to source space; neither helper
-may acquire Canvas, renderer, source, or DOM dependencies.
-
-### Procedural drawables
-
-`generators.js` contains pure, normalized mathematical recipes, limits,
-validation, and time-frame helpers—no Canvas, DOM, renderer, or persistence
-concerns. A generator has a stable `id`, a version, defaults, a normalized
-sampler, and a period. Bump its version when changing the durable recipe
-meaning; old `generatedStroke` records are deliberately rejected rather than
-silently reinterpreted.
-
-The current recipes are `spirograph` and `guillocheRosette`. Guilloché rosettes
-are a family of closed contours: the shared frame computes animation once per
-draw, and the geometry blends adjacent *integer* secondary frequencies so a
-motion frame remains closed at its seam. Keep the math normalized and
-deterministic for a given recipe and time.
-
-`drawable-path.js` validates durable `generatedStroke` records, bounds
-parameter sampling, and converts normalized geometry to one transient
-pixel-space contour family. It is the only layer that knows how a
-`generatedStroke` executes. A durable generated stroke contains its
-generator/version, `config`, `animation`, parameter `domain`/`sampling`, and
-immutable brush `style`; it has no per-generator placement state.
-
-`DrawingRasterizer` evaluates generic paths at project time and rerenders only
-when committed or preview content depends on time. `DrawingSource` forwards the
-time update. Drawing paths remain continuous semantic geometry, while sparse
-tiles derive one fixed periodic material. The renderer samples that material
-repeatedly and never navigates a drawing world. Brushes remain
-contour/path replay only: they must not contain generator-specific geometry or
-placement logic.
-
-### `brushes.js` — brush rendering
-
-Defines the `BrushPainter` raster-backend seam and today's Canvas2D painter.
-Brushes receive mapped source coordinates and paint options; they must not
-depend on pointer events, source revisions, renderer state, WebGL, or symmetry
-mapping. Do not make Canvas2D a durable brush or Fiber architectural contract.
-
-### `fiber-brush.js` — assisted Fiber material
-
-Owns the deterministic Fiber material recipe: bounded master-path derivation,
-population generation, gradient sampling, lifecycles, fan-out, branches, and
-preview population reduction. It receives an immutable path/style snapshot and
-must remain independent of pointer events, drawing history, renderer state,
-WebGL, and DOM UI. Fiber stroke version, seed, and user controls are persisted
-in the `pathStroke` style and must replay identically.
-
-### `brush-textures.js` — texture brush resources
-
-Owns the explicit PNG catalog, async decode, alpha-mask normalization,
-thumbnails, and bounded tinted-tip cache used by the `texture` Canvas2D brush.
-It must remain independent of drawing history and UI selection. Keep the asset
-catalog explicit because the native-module app has no build-time asset glob.
-
-### `perf.js` — development performance telemetry
-
-Owns debug-gated rolling timing measurement shared by rendering stages. It is
-runtime-only and must stay negligible when the debug flag is disabled.
-
-Use `measure(label, work)` around meaningful hot stages rather than adding
-ad-hoc timers. Telemetry is enabled only with
-`globalThis.__KALEIDOSCOPE_DEBUG_PERF__`; it accumulates rolling stats under
-`globalThis.__KALEIDOSCOPE_PERF_TIMINGS__` and must not affect normal behavior.
-
-### `app.js` — orchestration/UI
-
-Owns DOM/event wiring, control synchronization, active-source selection, pointer
-routing, workspace persistence/status, and export/recording UI. Do not move
-rendering math, GPU work, or source persistence here.
-
-It also owns generator draft/edit UI, reference-image overlay UI, brush-browser
-UI, and presentation-only FPS reporting. Generator drafts are previews; commits
-and edits use stable-ID `DrawingSource` document query/mutation APIs. The renderer's `onBeforeFrame`
-advances `DrawingSource` time, while its frame-change callback merely requests a
-render so drawing mutations remain incremental source updates.
-
-## Source contract
-
-Every renderer source implements:
-
-```
+```js
 source.getFrame()
 ```
 
 returning `null` or:
 
-```
+```js
 { pixels, width, height, revision, world? }
 ```
 
 Rules:
 
-- Sources own pixels, dimensions, and monotonic `revision`.
-- Increment `revision` whenever source pixels change.
+- A source owns its pixels, dimensions, and monotonic `revision`.
+- Increment `revision` when source pixels change.
 - `getFrame()` is non-destructive.
-- `world` is optional metadata for sources with explicit material coordinates:
-  `{ origin, extent, scale, wrap }`. Drawing uses fixed material bounds with
-  `wrap: "repeat"`; `scale` is the source-world scale used by mapping.
-- `Renderer` owns GPU upload state (`uploadedSource` / `uploadedRevision`).
-- Upload again when source identity changes, even if revision numbers match.
-- Never add source-type branches to `Renderer`.
+- `Renderer` owns GPU upload state.
+- A source mutation is not a renderer-state mutation.
 
-Keep two events distinct:
+---
 
-1. **Source activation/replacement** may reset feedback/rebuild presentation.
-2. **Incremental source mutation** (e.g. drawing) uploads pixels while retaining
-   feedback history; it must not emit renderer state or trigger workspace
-   persistence merely because source pixels changed.
+## Drawing execution model
 
-This distinction is required for high-frequency sources such as drawing/video.
+There are two fundamentally different operation types.
 
-## Rendering coordinate model
+### PaintOperation — immediate mode
 
-Sources do not implement kaleidoscope symmetry. `Renderer` samples one source
-texture and applies:
+Paint brushes deposit pixels while the gesture is happening.
 
-```
-screen UV
- -> center
- -> aspect correction
- -> global wallpaper map
- -> local symmetry/motif
- -> rotation
- -> undo aspect correction
- -> zoom
- -> pan
- -> source-image aspect correction
- -> fract/wrap
- -> source sample
- -> feedback
- -> hue
- -> bloom
+```text
+pointer/input
+    ↓
+PaintSession
+    ↓
+pixels deposited immediately
+    ↓
+gesture finishes
+    ↓
+PaintOperation stored for reconstruction
 ```
 
-Any future screen-to-source mapping (especially drawing input) must agree with
-this order. Do not casually duplicate, reorder, or approximate it.
+A durable `PaintOperation` stores the input/style needed to reconstruct the
+stroke later. It is **not authoritative retained raster state**.
 
-## Symmetry model
+**Paint completion changes history, not pixels.**
 
-There are **two separate symmetry layers** in this app and they must not be conflated.
+Normal paint completion must not discard the live result and repaint the
+stored operation just to "commit" it.
 
-1. **Global wallpaper/grid symmetry** (`global-wallpaper.js`): maps a point in the plane into a canonical representative of a wallpaper-group quotient. This determines the large-scale lattice / tiling structure.
-2. **Local motif symmetry** (`render.js` shader logic): after the global map, applies the kaleidoscope-style fold/rotation/motif transform inside that canonical region.
+Replay exists for reconstruction: restore, cache/material loss, undo rebuild,
+export, resolution changes, and similar cases.
 
-**Important: distinguish the visual pipeline from the shader coordinate pipeline.**
+### GeneratorOperation — retained mode
 
-Conceptually, the app creates a **local kaleidoscope motif** from the source and then arranges that motif using the **global wallpaper/grid symmetry**:
+Generators are retained state.
 
-```
-source → local motif → global wallpaper/grid → screen
-```
-
-The fragment shader performs the inverse lookup for each screen pixel, so its coordinate-mapping order is:
-
-```
-screen → global wallpaper map → local motif map → source
-```
-
-These are the same transformation viewed in opposite directions.
-
-Consequences:
-
-- Do not move local motif logic into `global-wallpaper.js`.
-- Do not reimplement wallpaper logic as a local motif effect.
-- A rendered result may show more symmetry than the selected wallpaper group if the local motif itself has additional symmetry; that can be mathematically correct.
-
-## Symmetry invariants
-
-`global-wallpaper.js` is deliberately group-theoretic, not "tile-ish". Current
-global modes: `single`, `p6m`, `p6`, `p4m`, `p4g`, `p3m1`, `p3`, `p31m`.
-
-It uses translation lattices and coset representatives to construct genuine
-quotient maps. Do not replace them with visually similar alternating-cell
-shortcuts.
-
-The local motif layer is applied afterward by `Renderer` (radial/mirror radial,
-spiral, tunnel, fractal fold, tile, p2, p4, pg, hexagonal, wallpaper-style
-behavior). A result may show more apparent symmetry than the selected global
-group when the local motif already has extra symmetry; that can be correct.
-
-## State/update semantics
-
-- Geometry/motion changes may require scene rebuild/timeline replay.
-- Pure post-processing such as bloom should use the post-process path and avoid
-  unnecessary feedback rebuilds.
-- Source-frame uploads are not renderer-state changes.
-- High-frequency interactions must avoid UI resync, localStorage writes, and
-  timeline rebuilds on every pointer event.
-- Behavior-preserving refactors must preserve shader math, bloom behavior,
-  feedback semantics, and coordinate order.
-
-## Input ownership
-
-`app.js` routes canvas gestures because meaning depends on the active source:
-
-```
-bitmap drag  -> Renderer pan
-drawing drag -> DrawingSource
-wheel        -> Renderer zoom
+```text
+GeneratorOperation
+    ↓
+generator config / animation / sampling
+    ↓
+derived geometry
+    ↓
+pixels
 ```
 
-Pan/zoom are renderer transforms, not source properties. Use pointer capture for
-drag/draw interactions so leaving the canvas does not drop the interaction.
+The generator recipe is authoritative. Changing generator state may require
+recomposition.
 
-## UI and persistence conventions
+Current generators include Spirograph and Guilloché Rosette.
 
-- Keep native ES modules; do not introduce a framework without explicit need.
-- Preserve existing DOM IDs unless a feature requires an HTML change.
-- Renderer controls (symmetry, motion, feedback, bloom, etc.) stay shared across
-  source types; `app.js` shows/hides source-specific controls.
-- Workspace settings persist serialized renderer state via `app.js`.
-- Drawing content persists `DrawingSource.getContentState()` and controller
-  settings; generated strokes persist their durable recipes, never sampled
-  contour caches or motif canvases.
-- Bitmap data persists through `BitmapSource` / IndexedDB.
-- Never persist GPU objects, renderer internals, DOM nodes, decoded `Image`
-  objects, or transient interaction state.
+### One ordered document
+
+Paint and generator operations share one global operation sequence:
+
+```text
+Paint A
+Generator X
+Paint B
+Generator Y
+Paint C
+```
+
+They are not separate layer stacks.
+
+---
+
+## PaintSessions
+
+A `PaintSession` is transient runtime state for an in-progress or finishing
+paint gesture.
+
+Rules:
+
+- PaintSessions are never persisted.
+- They own transient brush state such as RNG, tangent continuity, spacing,
+  particles, or release-tail state.
+- They deposit pixels incrementally.
+- A PaintSession may continue briefly after pointer-up if the brush has a
+  finishing phase.
+- Raster/material loss may reconstruct the already-visible PaintSession state.
+- Multiple PaintSessions may coexist when an older stroke is still finishing.
+- Exact microscopic interleaving of concurrent PaintSessions does not need to
+  survive later durable reconstruction.
+
+**Do not create durable per-operation pixel layers or deposit logs to preserve
+live interleaving.**
+
+### Generator mutation gate
+
+Do not create, edit, remove, or otherwise mutate retained generator state while
+any PaintSession is active or finishing.
+
+This prevents retained recomposition from racing unresolved immediate paint.
+
+---
+
+## Undo semantics
+
+Undo is one global single-use slot, not a stack.
+
+```text
+Paint commit       -> one undo
+Generator commit   -> one undo
+Generator edits    -> no new undo
+```
+
+A generator draft is preview-only. Committing it creates one
+`GeneratorOperation` and one undoable creation action.
+
+Subsequent property edits mutate that retained operation by stable ID and do
+not create additional undo actions.
+
+Do not casually change this behavior.
+
+---
+
+## Drawing module ownership
+
+### `drawing-document.js`
+
+Owns durable semantic truth:
+
+- schema-v3 `PaintOperation` and `GeneratorOperation`
+- stable IDs
+- background
+- validation
+- single-level undo
+- persistence
+- replace-by-ID / clear
+
+Every durable mutation returns an explicit ChangeSet.
+
+It owns no Canvas, renderer, time, texture, pointer, or cache state.
+
+### `drawing-source.js`
+
+`DrawingSource` is the renderer-facing facade.
+
+`DrawingRasterizer` owns derived raster mechanics:
+
+- material canvases
+- sparse tiles
+- RenderIndex / bounds
+- periodic copies
+- composition and invalidation
+- transient PaintSession orchestration
+- previews
+- raster reconstruction
+
+It must remain WebGL-free.
+
+**The rasterizer owns raster mechanics, not brush mechanics.**
+
+Do not accumulate branches such as:
+
+```js
+if (brush === "wisp") ...
+else if (brush === "fiber") ...
+```
+
+Brush-specific simulation and mechanics belong in the brush layer behind a
+brush-neutral transient/replay contract.
+
+### `drawing-controller.js`
+
+Owns:
+
+- pointer lifecycle
+- tools and constraints
+- input sampling
+- frozen gesture style
+- PaintSession start/update/finish
+- constructed gesture interaction
+
+It does not own raster caches, generator geometry, or renderer transforms.
+
+### `drawing-mapping.js`
+
+Owns frozen screen-to-source mapping for drawing input.
+
+Do not reimplement renderer transforms ad hoc in the controller or brushes.
+
+### `brushes.js` / `brush-painter.js`
+
+Own brush mechanics and backend-neutral paint instructions.
+
+Brushes receive mapped source coordinates and style. They must not depend on:
+
+- pointer DOM events
+- renderer state
+- symmetry mapping
+- drawing history
+- WebGL
+
+Transient brush state belongs to the PaintSession-side brush implementation,
+not durable document state.
+
+### Specialized brushes
+
+`wisp-brush.js` owns Wisp simulation and source-faithful invariants.
+
+Wisp is an immediate-mode PaintOperation, not a generator. It has transient
+simulation state and an asynchronous release tail. Read its module-level
+invariants before changing its mechanics.
+
+Hot Wisp rendering should stream emissions; do not restore a full-stroke
+`emissions[]` history or rescan the entire consumed input prefix on every new
+sample.
+
+`fiber-brush.js` owns deterministic Fiber/Hair material generation. Keep it
+independent of drawing history, renderer state, WebGL, pointer events, and DOM.
+
+### `generators.js` / `drawable-path.js`
+
+`generators.js` owns pure normalized mathematical recipes and validation.
+
+`drawable-path.js` owns conversion of a durable `GeneratorOperation` into
+transient source-space contours at project time.
+
+Brushes must not contain generator geometry.
+
+Generator recipes must remain deterministic for a given durable state and time.
+
+---
+
+## Coordinate and symmetry model
+
+There are two distinct symmetry layers:
+
+1. global wallpaper/grid symmetry
+2. local kaleidoscope motif symmetry
+
+Conceptual visual direction:
+
+```text
+source
+  -> local motif
+  -> global wallpaper/grid
+  -> screen
+```
+
+Fragment-shader lookup direction:
+
+```text
+screen
+  -> global wallpaper map
+  -> local motif map
+  -> source
+```
+
+These are the same transform viewed in opposite directions.
+
+Do not:
+
+- move local motif logic into `global-wallpaper.js`
+- implement wallpaper groups as local motif effects
+- reorder the mapping casually
+- duplicate screen-to-source math independently
+
+A result can show more apparent symmetry than the selected wallpaper group if
+the local motif contributes additional symmetry.
+
+---
+
+## Persistence
+
+Persist:
+
+- renderer state
+- drawing schema-v3 document state
+- controller settings
+- bitmap source data through `BitmapSource`
+
+Do not persist:
+
+- PaintSessions
+- particle systems / live brush simulation state
+- emitted Wisp/Fiber geometry
+- Canvas objects
+- sparse tiles
+- raster checkpoints
+- prepared geometry caches
+- GPU objects
+- DOM nodes
+
+For PaintOperations, stored samples/style are reconstruction input.
+
+For GeneratorOperations, stored generator state is authoritative.
+
+---
+
+## Performance invariants
+
+High-frequency drawing paths must not:
+
+- replay historical committed artwork on every input sample
+- rebuild the timeline on every pointer event
+- resync the full UI on every pointer event
+- write localStorage on every pointer event
+- retain O(total emitted brush geometry) temporary histories without need
+
+Static committed content should not be repeatedly derived or rasterized merely
+because project time changes.
+
+Use `perf.js` for meaningful debug-gated hot-stage timing instead of ad-hoc
+production timers.
+
+---
 
 ## Change discipline
 
-Prefer the smallest change that preserves boundaries:
+First classify the change by owner:
 
-- no `SourceManager` just to switch sources
-- no source-specific behavior in `Renderer`
-- no renderer transforms in source classes
-- no unrelated rendering rewrites during structural refactors
-- do not combine structural and visual changes unless required
+```text
+UI/orchestration        -> app.js
+pointer/tool behavior   -> drawing-controller.js
+screen/source mapping   -> drawing-mapping.js
+durable state / undo    -> drawing-document.js
+raster/cache/session    -> drawing-source.js
+brush mechanics         -> brush module
+generator math          -> generators.js / drawable-path.js
+GPU/symmetry/display    -> render.js
+```
+
+Prefer the smallest change that preserves these boundaries.
+
+Do not:
+
+- add source-specific behavior to `Renderer`
+- put brush physics in `DrawingRasterizer`
+- put generator geometry in brushes
+- persist derived raster state
+- combine structural refactors with unrelated visual changes
+
+---
 
 ## Bug-fix discipline
 
-For a reported defect, do not implement a speculative fix first.
+For reported defects:
 
-1. Trace the reported behavior through the real owning path, including UI,
-   controller, persistence, and rendering boundaries where applicable.
-2. Add a focused automated regression test that reproduces the reported failure
-   through that path. Run it and confirm it fails for the stated reason.
-3. Implement the smallest fix that makes the new test pass.
-4. Run the focused regression test and all existing tests covering affected
-   behavior.
-5. Do not report a bug fixed solely because unit tests pass when the report is
-   about browser interaction; browser-smoke the exact reported interaction, or
-   explicitly state that it could not be run.
+1. Trace the real owning path.
+2. Add a focused regression test that fails for the reported reason.
+3. Implement the smallest fix.
+4. Run focused and affected tests.
+5. Browser-smoke the real interaction when the bug is interactive.
+
+Do not claim an interactive bug fixed solely from a low-level unit test.
+
+---
 
 ## Verification
 
-Run existing automated tests covering changed behavior, then browser-smoke the
-relevant paths:
+For drawing changes, verify the affected invariants.
 
-- bitmap load/restore
-- source switching, when applicable
-- drag/pan and wheel zoom
-- symmetry controls
-- feedback and timeline seek/rebuild
-- bloom without unintended timeline rebuilds
-- PNG export and recording
+### Paint
 
-For drawing/high-frequency sources also verify:
-
-- bitmap -> drawing -> bitmap restores the correct source
-- incremental drawing does not clear feedback history
-- pointer capture survives leaving the canvas
+- paint deposits incrementally during the gesture
+- completion does not repaint the stroke
 - fast strokes remain continuous
-- unchanged frames are not repeatedly uploaded
+- active/finishing PaintSessions survive required raster reconstruction
+- source switching restores the correct pixels
 
-For generators and texture brushes also verify:
+### Wisp / stateful brushes
 
-- draft preview, commit, edit, undo, and workspace restore preserve the
-  generated recipe and style
-- an animated generator changes with timeline time, while static drawing does
-  not cause a source rerasterization on timeline ticks
-- source motion does not relocate or rebuild the fixed periodic material
-- texture selection survives async asset loading and causes a replay when its
-  mask becomes available
-- Guilloché animation keeps closed contours at its frequency-transition seam
+- Wisp release tail continues after pointer-up and then stops
+- Wisp reconstruction restores only the already-visible tail progress
+- stationary samples remain meaningful
+- stateful RNG/tangent/spacing behavior remains deterministic
+- periodic copies do not advance logical brush state multiple times
+
+### Generators
+
+- draft changes do not mutate durable state
+- Commit creates one GeneratorOperation
+- generator creation creates one undo
+- generator property edits create no additional undo
+- generator mutation is blocked while PaintSessions are active/finishing
+- animated generators follow project time
+- workspace restore preserves generator recipe/style
+
+### Renderer/source
+
+- incremental drawing does not unnecessarily reset feedback
+- unchanged source frames are not repeatedly uploaded
+- symmetry/mapping behavior is unchanged
+- bloom/post-processing changes do not cause unrelated reconstruction
 
 Report what was tested and anything that could not be run.
 
-For interactive bugs, tests must cover the highest practical integration
-boundary; a renderer-only test does not validate controller/UI wiring.
-
-## Drawing change protocol
-
-First classify the change: durable document, pointer/tool, screen-to-source
-mapping, path/generator, brush, or derived raster/cache. Change only its owner,
-add a failing regression at the highest practical boundary, then run the
-relevant unit tests and browser smoke.
-
-For performance-sensitive drawing changes, preserve these checks: static append
-and preview updates do not replay historical committed artwork; source motion
-does not reconstruct the committed material; static prepared geometry is
-not re-derived for bounds and rasterization. The target animation contract is
-that static drawables are neither derived nor rasterized on a time tick.
+---
 
 ## Maintaining this file
 
-Update `AGENTS.md` only for durable module responsibilities, invariants, common
-navigation hints, or standard verification steps. Do not add task-specific
-plans, temporary debugging notes, or changelog history. Link to a dedicated
-document if a topic needs substantial prose.
+Keep only durable architecture, invariants, navigation hints, and standard
+verification rules here.
+
+If an implementation detail requires substantial explanation, document it in
+the owning module or `docs/` and link to it from here.

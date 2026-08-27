@@ -22,6 +22,7 @@ test("controller stages preview separately then commits a styled path drawable",
   assert.equal(commits.length, 1);
   assert.equal(commits[0].kind, "pathStroke");
   assert.equal(commits[0].style.brush, "pen");
+  assert.equal(commits[0].style.materialVersion, 1);
 });
 
 test("tool and brush settings are independent", () => {
@@ -176,7 +177,7 @@ test("freehand reduction does not double-count sampled hold deposition", () => {
   assert.equal(points.reduce((total, point) => total + (point.holdCount || 0), 0), 3);
 });
 
-test("freehand keeps its complete sample stream until the active stroke ends", () => {
+test("freehand preserves its exact sampled recipe through active completion", () => {
   const updates = [], commits = [];
   const source = {
     width: 1000, height: 100,
@@ -190,7 +191,7 @@ test("freehand keeps its complete sample stream until the active stroke ends", (
   for (let index = 1; index <= 700; index += 1) controller.capture({ x: index - 1, y: 50 }, { x: index, y: 50 }, controller.current);
   assert.ok(controller.current.points.length > 512, "the active paint session never compacts its input prefix");
   controller.end(event("up", 700, 50));
-  assert.equal(updates.at(-1).points.length, 512, "only the durable completed stroke is compacted");
+  assert.ok(updates.at(-1).points.length > 512, "completion commits the exact samples that produced the visible raster");
   assert.equal(commits.length, 0, "the active-session path uses its normal completion seam");
 });
 

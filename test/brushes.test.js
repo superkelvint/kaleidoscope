@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { BRUSHES, canReplayBrushPath, colorAtPathPosition, createPaintSessionRenderer, replayBrushContours, replayBrushPath } from "../brushes.js";
+import { BRUSHES, canReplayBrushPath, colorAtPathPosition, createImmediateBrushSession, createPaintSessionRenderer, replayBrushContours, replayBrushPath } from "../brushes.js";
 import { brushTextureCatalog } from "../brush-textures.js";
 import { BrushPainter } from "../brush-painter.js";
 
@@ -32,6 +32,19 @@ const options = {
   nibRatio: .25, density: 4, particleSize: 2, tangent: { x: 1, y: 0 }
 };
 
+function assertV1LiveRebuildAndReplayMatch(style, points) {
+  const liveSession = createImmediateBrushSession(style);
+  for (const point of points) { liveSession.append(point); liveSession.hold(point, Math.max(0, Number(point.holdCount) || 0)); }
+  const live = liveSession.takeDelta();
+  const durable = [];
+  replayBrushPath(new BrushPainter(item => durable.push(item)), points, style);
+  const renderer = createPaintSessionRenderer({ kind: "pathStroke", points: [], style });
+  renderer.advance({ kind: "pathStroke", points, style });
+  const rebuilt = renderer.reconstruct({ kind: "pathStroke", points, style }).flatMap(batch => batch.instructions);
+  assert.deepEqual(rebuilt, live, "PaintSession reconstruction preserves chronological samples and holds");
+  assert.deepEqual(durable, live, "durable replay preserves the full live instruction sequence");
+}
+
 test("transient paint-session renderers expose brush-neutral batches and backdrop capability", () => {
   const pen = createPaintSessionRenderer({ kind: "pathStroke", points: [], style: { ...options, brush: "pen", taper: "none" } });
   const penBatches = pen.advance({ kind: "pathStroke", points: [{ x: 10, y: 12 }], style: { ...options, brush: "pen", taper: "none" } });
@@ -44,6 +57,11 @@ test("transient paint-session renderers expose brush-neutral batches and backdro
   const wispBatches = wisp.advance({ kind: "pathStroke", points: [{ x: 10, y: 12 }, { x: 18, y: 15 }, { x: 26, y: 14 }, { x: 34, y: 20 }, { x: 42, y: 18 }], style: wispStyle });
   assert.equal(wispBatches[0].requiresBackdrop, true);
   assert.ok(wispBatches[0].instructions.length);
+
+  const additivePen = createPaintSessionRenderer({ kind: "pathStroke", points: [], style: { ...options, brush: "pen", taper: "none", materialVersion: 1, colorMode: "gradient", startColor: "#ff0000", endColor: "#0000ff" } });
+  const additiveBatches = additivePen.advance({ kind: "pathStroke", points: [{ x: 10, y: 12 }], style: { ...options, brush: "pen", taper: "none", materialVersion: 1, colorMode: "gradient", startColor: "#ff0000", endColor: "#0000ff" } });
+  assert.equal(additiveBatches[0].instructions[0].composite, "lighter");
+  assert.equal(additiveBatches[0].requiresBackdrop, true);
 });
 
 test("ribbon stamps one strand per configured line across its perpendicular span", () => {
@@ -186,6 +204,82 @@ test("gradient brush styles interpolate from the first path stamp to the last", 
   const ctx = new FakeContext2D();
   replayBrushPath(ctx, [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 20, y: 0 }], style);
   assert.deepEqual(ctx.calls.filter(([name]) => name === "fillStyle").map(([, color]) => color), ["#ff0000", "#800080", "#0000ff"]);
+});
+
+test("materialVersion 1 changes only deterministic Pen material, not replay geometry", () => {
+  const path = [{ x: 0, y: 0 }, { x: 10, y:0 }, { x: 30, y: 0 }];
+  const legacy = [], shared = [];
+  const style = { ...options, brush: "pen", taper: "sine", colorMode: "gradient", startColor: "#ff0000", endColor: "#0000ff" };
+  replayBrushPath(new BrushPainter(item => legacy.push(item)), path, style);
+  replayBrushPath(new BrushPainter(item => shared.push(item)), path, { ...style, materialVersion: 1 });
+  assert.deepEqual(shared.map(({ x, y, radius }) => ({ x, y, radius })), legacy.map(({ x, y, radius }) => ({ x, y, radius })));
+  assert.notDeepEqual(shared.map(item => item.color), legacy.map(item => item.color));
+  assert.ok(shared.every(item => item.composite === "lighter"));
+});
+
+test("materialVersion 1 Pen resolves identical live and replay material fields", () => {
+  const points = [{ x: 0, y: 0 }, { x: 12, y: 0 }, { x: 36, y: 0 }];
+  const style = { ...options, brush: "pen", taper: "sine", materialVersion: 1, colorMode: "gradient", startColor: "#ff0000", endColor: "#0000ff" };
+  const live = createImmediateBrushSession(style);
+  for (const point of points) live.append(point);
+  const replay = [];
+  replayBrushPath(new BrushPainter(item => replay.push(item)), points, style);
+  assert.deepEqual(live.takeDelta().map(({ color, opacity, composite }) => ({ color, opacity, composite })), replay.map(({ color, opacity, composite }) => ({ color, opacity, composite })));
+});
+
+test("materialVersion 1 Spray retains each segment's live material through replay", () => {
+  const points = [{ x: 0, y: 0 }, { x: 48, y: 0 }];
+  const style = { ...options, brush: "spray", seed: 42, density: 1, size: 10, particleSize: 1, materialVersion: 1, colorMode: "gradient", startColor: "#ff0000", endColor: "#0000ff" };
+  const live = createImmediateBrushSession(style);
+  for (const point of points) live.append(point);
+  const replay = [];
+  replayBrushPath(new BrushPainter(item => replay.push(item)), points, style);
+  assert.deepEqual(live.takeDelta().map(({ color, opacity, composite }) => ({ color, opacity, composite })), replay.map(({ color, opacity, composite }) => ({ color, opacity, composite })));
+});
+
+test("v1 Spray preserves stationary and moving hold chronology through rebuild and replay", () => {
+  const style = { ...options, brush: "spray", seed: 42, density: 2, size: 10, particleSize: 1, materialVersion: 1, colorMode: "gradient", startColor: "#ff0000", endColor: "#0000ff" };
+  assertV1LiveRebuildAndReplayMatch(style, [{ x: 20, y: 20, holdCount: 3 }]);
+  assertV1LiveRebuildAndReplayMatch(style, [{ x: 0, y: 0, holdCount: 2 }, { x: 24, y: 0, holdCount: 3 }, { x: 48, y: 8, holdCount: 1 }]);
+});
+
+test("v1 Texture preserves segment material and interleaved holds through rebuild and replay", () => {
+  const originalTip = brushTextureCatalog.getTintedTip;
+  brushTextureCatalog.getTintedTip = (id, color) => ({ width: 8, height: 4, id, color });
+  try {
+    const style = { ...options, brush: "texture", textureId: "sequence-tip", spacing: .5, rotationMode: "followStroke", materialVersion: 1, colorMode: "gradient", startColor: "#ff0000", endColor: "#0000ff" };
+    assertV1LiveRebuildAndReplayMatch(style, [{ x: 0, y: 0 }, { x: 7, y: 0 }, { x: 39, y: 6 }, { x: 46, y: 6 }]);
+    assertV1LiveRebuildAndReplayMatch(style, [{ x: 0, y: 0 }, { x: 18, y: 0, holdCount: 2 }, { x: 51, y: 9 }, { x: 64, y: 9, holdCount: 1 }]);
+  } finally {
+    brushTextureCatalog.getTintedTip = originalTip;
+  }
+});
+
+test("materialVersion 1 live paint reconstructs identical pixel-input instructions", () => {
+  const points = [{ x: 0, y: 0 }, { x: 12, y: 0 }, { x: 36, y: 8 }];
+  const style = { ...options, brush: "pen", taper: "sine", materialVersion: 1, colorMode: "gradient", startColor: "#ff0000", endColor: "#0000ff" };
+  const renderer = createPaintSessionRenderer({ kind: "pathStroke", points: [], style });
+  const live = renderer.advance({ kind: "pathStroke", points, style }).flatMap(batch => batch.instructions);
+  const rebuilt = renderer.reconstruct({ kind: "pathStroke", points, style }).flatMap(batch => batch.instructions);
+  assert.deepEqual(rebuilt, live);
+});
+
+test("solid materialVersion 1 Pen bypasses legacy native replay and retains additive instructions", () => {
+  const instructions = [];
+  replayBrushPath(new BrushPainter(item => instructions.push(item)), [{ x: 0, y: 0 }, { x: 20, y: 0 }], {
+    ...options, brush: "pen", taper: "none", colorMode: "solid", color: "#22aa66", materialVersion: 1
+  });
+  assert.equal(instructions.length, 2, "v1 uses per-sample material instructions rather than one native polyline");
+  assert.ok(instructions.every(item => item.color === "#22aa66" && item.composite === "lighter"));
+});
+
+test("materialVersion 1 contour replay keeps solid generated-Pen semantics", () => {
+  const instructions = [];
+  replayBrushContours(new BrushPainter(item => instructions.push(item)), [{ points: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }], closed: true }], {
+    ...options, brush: "pen", taper: "none", colorMode: "solid", materialVersion: 1
+  });
+  assert.equal(instructions.length, 3);
+  assert.ok(instructions.every(item => item.composite === "lighter"));
 });
 
 test("texture replay uses cached tips, size-relative spacing, and stable path rotation", () => {

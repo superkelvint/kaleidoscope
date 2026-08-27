@@ -2,6 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { derivePath, drawableDependsOnTime, isDrawable } from "../drawable-path.js";
 import { prepareGuillocheFrame } from "../generators.js";
+import { replayBrushContours } from "../brushes.js";
+import { BrushPainter } from "../brush-painter.js";
+import { contourEnergy } from "../brush-material.js";
 
 function spirograph(overrides = {}) {
   return {
@@ -31,6 +34,16 @@ test("spirograph derives independent arm contours and morphs deterministically w
   assert.notDeepEqual(atZero.contours[0].points, later.contours[0].points);
   assert.deepEqual(atZero, derivePath(drawable, { width: 200, height: 100, time: 0 }));
   assert.equal(drawableDependsOnTime(drawable), true);
+});
+
+test("generated closed contours resolve v1 material from local curvature", () => {
+  const drawable = spirograph({ style: { brush: "pen", taper: "none", materialVersion: 1, colorMode: "gradient", startColor: "#ff0000", endColor: "#0000ff", size: 4, opacity: .85, seed: 9 } });
+  const contours = derivePath(drawable, { width: 200, height: 200, time: 0 }).contours, instructions = [];
+  replayBrushContours(new BrushPainter(item => instructions.push(item)), contours, drawable.style);
+  const energies = contours[0].points.map((_, index) => contourEnergy(contours[0].points, index, drawable.style.size, { closed: true }));
+  const low = energies.indexOf(Math.min(...energies)), high = energies.indexOf(Math.max(...energies));
+  assert.ok(energies[high] > energies[low]);
+  assert.notEqual(instructions[low].color, instructions[high].color, "tighter generator turns receive a distinct material tint");
 });
 
 test("static and malformed generator recipes are handled safely", () => {

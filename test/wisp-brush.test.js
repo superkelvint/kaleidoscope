@@ -41,6 +41,13 @@ test("Wisp uses five simulation attempts per input frame and backend-neutral lig
   assert.ok(instructions.every(item => item.width === 2));
 });
 
+test("Wisp rendered alpha is exactly its legacy simulation formula", () => {
+  const samples = [{ x: 0, y: 0 }, { x: 12, y: 9 }, { x: 24, y: 4 }, { x: 36, y: 18 }];
+  const prepared = prepareWispPath(samples, style, { tail: false }), instructions = [];
+  renderWispPath(new BrushPainter(item => instructions.push(item)), samples, style, { tail: false });
+  assert.deepEqual(instructions.map(item => item.opacity), prepared.emissions.map(emission => style.opacity * WISP_V1.startOpacity * emission.newest.life / WISP_V1.startLife));
+});
+
 test("Wisp preview is a prefix of the same deterministic simulation without a release tail", () => {
   const preview = prepareWispPath(path, style, { tail: false });
   const committed = prepareWispPath(path, style, { tail: true });

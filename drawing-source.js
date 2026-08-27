@@ -96,7 +96,7 @@ export class DrawingRasterizer {
     this.baseStaticCanvas = createPaintCanvas(this.width, this.height); this.baseStaticCtx = this.baseStaticCanvas.getContext("2d");
     this.materialBounds = { left: 0, top: 0, width: this.width, height: this.height };
     this.materialScale = 1; this.requestedPixelDensity = 1; this.materialRebuildCount = 0;
-    this.tiles = new Map(); this.operations = []; this.preview = null; this.livePreview = null;
+    this.tiles = new Map(); this.committedRasterGeneration = 0; this.operations = []; this.preview = null; this.livePreview = null;
     // Immediate paint is deliberately separate from committed reconstruction.
     // It is only discarded when a document-driven recomposition is necessary.
     this.paintSessions = new Map(); this.hasImmediatePixels = false; this.immediateIsComposite = false; this.activeReconcilePending = false;
@@ -286,7 +286,8 @@ export class DrawingRasterizer {
   tile(x, y) {
     count("Drawing tile lookup", () => this.perfMetadata({ tile: { x, y }, hit: this.tiles.has(tileKey(x, y)) }));
     const key = tileKey(x, y); let tile = this.tiles.get(key);
-    if (!tile) { const canvas = createPaintCanvas(TILE_SIZE, TILE_SIZE); tile = { x, y, canvas, ctx: canvas.getContext("2d") }; this.tiles.set(key, tile); this.rebuildTile(x, y); }
+    if (!tile) { const canvas = createPaintCanvas(TILE_SIZE, TILE_SIZE); tile = { x, y, canvas, ctx: canvas.getContext("2d"), generation: -1 }; this.tiles.set(key, tile); }
+    if (tile.generation !== this.committedRasterGeneration) this.rebuildTile(x, y);
     return tile;
   }
   rebuildTile(x, y) {
@@ -297,6 +298,7 @@ export class DrawingRasterizer {
         count("Drawing tile history operation replay", () => this.perfMetadata({ tile: { x, y }, brush: operation.drawable?.style?.brush }));
         this.paintCachedOperation(operation, tile.ctx, { x: x * TILE_SIZE, y: y * TILE_SIZE, width: TILE_SIZE, height: TILE_SIZE });
       }
+      tile.generation = this.committedRasterGeneration;
     }, () => this.perfMetadata({ tile: { x, y }, replayedOperations: this.operations.length }));
   }
   prepareView({ pixelDensity } = {}) {
@@ -438,13 +440,36 @@ export class DrawingRasterizer {
   commitImmediatePaint(operation, bounds = null) {
     const raster = rasterOperation(operation); this.operations.push(raster);
     this.renderIndex.add(raster, bounds ? padBounds(bounds) : this.boundsForOperation(raster), this.materialBounds);
-    // The immediate overlay can be cleared when an active brush replaces its
-    // prefix (Spray holds do this at its fixed rate). Make completed samples
-    // available to the committed composition first, so clearing that overlay
-    // never erases an earlier completed stroke.
-    this.appendStaticOperationToCachedTiles(raster);
+    // A normal immediate commit promotes the pixels already deposited by the
+    // PaintSession. Tiles deliberately remain stale: they are reconstructed
+    // lazily from the durable recipe only if a later composition needs one.
+    this.committedRasterGeneration += 1;
     this.staticPrefixEnd = this.operations.length;
-    this.invalidateCommittedView();
+    this.promoteImmediateRaster();
+    this.rerender();
+  }
+  promoteImmediateRaster() {
+    // This must stay a pixel-only operation. In particular, do not call the
+    // committed composer here: completion must not replay a brush or history.
+    let composite = this.immediateCanvas;
+    if (!this.immediateIsComposite) {
+      composite = createPaintCanvas(this.canvas.width, this.canvas.height);
+      const context = composite.getContext("2d");
+      context.drawImage(this.committedCanvas, 0, 0);
+      if (this.hasImmediatePixels) context.drawImage(this.immediateCanvas, 0, 0);
+    }
+    if (this.paintSessions.size) {
+      // Keep the exact interleaving visible while another session is still
+      // depositing. Future immediate batches append to this composite.
+      this.immediateCanvas = composite; this.immediateCtx = composite.getContext("2d");
+      this.hasImmediatePixels = true; this.immediateIsComposite = true;
+      return;
+    }
+    this.committedCtx.clearRect(0, 0, this.committedCanvas.width, this.committedCanvas.height);
+    this.committedCtx.drawImage(composite, 0, 0);
+    this.committedDirty = false;
+    this.immediateCtx.clearRect(0, 0, this.immediateCanvas.width, this.immediateCanvas.height);
+    this.hasImmediatePixels = false; this.immediateIsComposite = false;
   }
   paintOperation(operation, context, options = {}) { return this.paintDrawable(operation.drawable, context, { ...options, prepared: this.prepareOperation(operation) }); }
   paintCachedOperation(operation, context, tile) {

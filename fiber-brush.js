@@ -1,5 +1,6 @@
 import { measure } from "./perf.js";
 import { toBrushPainter } from "./brush-painter.js";
+import { resolveBrushMaterial } from "./brush-material.js";
 
 // Deterministic Canvas2D material brush.  This module deliberately knows
 // nothing about pointers, sources, WebGL, or symmetry.
@@ -44,6 +45,14 @@ function gradient(style, u) {
 }
 function colorString(rgb, light = 0) {
   return `rgb(${rgb.map(value => Math.round(lerp(value, 255, light))).join(",")})`;
+}
+function usesSharedMaterial(style) { return Number(style?.materialVersion) === 1; }
+function fiberMaterial(style, { progress = 0, phase = 0, generation = 0, core = false } = {}) {
+  if (!usesSharedMaterial(style)) return null;
+  return resolveBrushMaterial(style, {
+    progress, variation: Math.sin(phase * TAU), energy: clamp(.3 + generation * .15 + (core ? .55 : 0)),
+    opacityScale: 1, profile: "fiber"
+  });
 }
 function resample(points, limit = 192) {
   if (points.length < 2) return points.map(point => ({ x: point.x, y: point.y }));
@@ -131,8 +140,9 @@ function drawFiber(painter, master, params, style, core = false, composite) {
     if (life > .001) {
       // Gradients are anchored to gesture direction. Strand phase may affect
       // material shape and brightness, but never swap the chosen endpoints.
+      const material = fiberMaterial(style, { progress: middleT, phase: params.colorPhase, core });
       const rgb = gradient(style, style.colorMode === "gradient" ? middleT : 0);
-      painter.polyline([previous, next], { opacity: clamp((Number(style.opacity) || 0) * params.opacity * life * (core ? .7 : 1)), color: colorString(rgb, core ? lerp(.15, .5, clamp(style.assistLevel)) : 0), width: Math.max(.18, size * params.width * life * (core ? .42 : 1)), cap: "round", join: "round", composite });
+      painter.polyline([previous, next], { opacity: clamp((Number(style.opacity) || 0) * params.opacity * life * (core ? .7 : 1)) * (material?.opacity ?? 1), color: material?.color || colorString(rgb, core ? lerp(.15, .5, clamp(style.assistLevel)) : 0), width: Math.max(.18, size * params.width * life * (core ? .42 : 1)), cap: "round", join: "round", composite });
     }
     previous = next;
   }
@@ -289,7 +299,8 @@ function strokeContinuous(painter, points, style, { width, opacity, phase, gener
   // measured against the complete gesture, not the current chunk; otherwise
   // every chunk incorrectly lands near the gradient's end colour.
   const progress = clamp(mid.arcLength / Math.max(V2.sampleSpacing, Number(gradientArcLength) || points.at(-1).arcLength));
-  painter.polyline(points, { cap: lineCap, join: "round", opacity: clamp((Number(style.opacity) || 0) * opacity * (core ? .65 : 1)), color: v2Color(style, phase, progress, generation), width: Math.max(.18, (Number(style.size) || 1) * width * taper * (core ? .42 : 1)), composite });
+  const material = fiberMaterial(style, { progress, phase, generation, core });
+  painter.polyline(points, { cap: lineCap, join: "round", opacity: clamp((Number(style.opacity) || 0) * opacity * (core ? .65 : 1)) * (material?.opacity ?? 1), color: material?.color || v2Color(style, phase, progress, generation), width: Math.max(.18, (Number(style.size) || 1) * width * taper * (core ? .42 : 1)), composite });
   return points.length - 1;
 }
 function strokeTapered(painter, points, style, params) {
