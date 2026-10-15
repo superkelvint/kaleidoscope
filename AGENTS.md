@@ -16,8 +16,11 @@ notes and task-specific plans elsewhere.
 | Drawing pointer/tool lifecycle        | `drawing-controller.js`                  |
 | Screen-to-source drawing mapping      | `drawing-mapping.js`                     |
 | Brush mechanics / replay              | `brushes.js`, `brush-painter.js`         |
+| Recipe fields and validation          | `stroke-recipe.js`                      |
+| Prepared rendering / sessions         | `stroke-renderer.js`                    |
 | Shared stroke frames                  | `stroke-geometry.js`                    |
 | Ink/Silk materials and sessions        | `stroke-material.js`                    |
+| Static animation composition caches   | `drawing-raster-cache.js`               |
 | Wisp                                  | `wisp-brush.js`                          |
 | Fiber/Hair                            | `fiber-brush.js`, then `brushes.js`      |
 | Texture brush assets                  | `brush-textures.js`                      |
@@ -166,6 +169,8 @@ Do not create, edit, remove, or otherwise mutate retained generator state while
 any PaintSession is active or finishing.
 
 This prevents retained recomposition from racing unresolved immediate paint.
+Durable replace, undo, clear, and restore also wait for PaintSessions to finish;
+they must not discard an active gesture or its release tail.
 
 ---
 

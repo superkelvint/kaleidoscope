@@ -95,3 +95,12 @@ test("Silk wander changes tethered fibers while gradients color the structural s
   const gradient = output({ options: { colorMode: "gradient", startColor: "#ff0000", endColor: "#0000ff" } }).filter(item => item.role === "spine");
   assert.ok(new Set(gradient.map(item => item.color)).size > 1);
 });
+
+test("closed Silk generator contours retain every exact structural edge", () => {
+  const points = [{ x: 0, y: 0 }, { x: 20, y: 0 }, { x: 20, y: 20 }, { x: 0, y: 20 }];
+  const frame = deriveStrokeFrame(points, { closed: true }), instructions = [];
+  renderMaterial(new BrushPainter(item => instructions.push(item)), { paths: [{ frame }] }, material, { seed: 7 });
+  const spine = instructions.filter(item => item.role === "spine");
+  assert.equal(spine.length, points.length);
+  assert.deepEqual(spine.at(-1).points, [points.at(-1), points[0]]);
+});

@@ -1,3 +1,4 @@
+import { makePaintRecipe } from "./stroke-recipe.js";
 import { BRUSHES, canReplayBrushPath } from "./brushes.js";
 import { DEFAULT_BRUSH_TEXTURE_ID } from "./brush-textures.js";
 import { interpretGesture, preprocessGesture, sampleCanonicalGesture } from "./gesture-interpreter.js";
@@ -18,7 +19,7 @@ export class DrawingController {
     this.settings = { tool: "freehand", geometry: "freehand", material: "ink", brush: "pen", color: "#ffffff", colorMode: "solid", gradientStartColor: "#ffffff", gradientEndColor: "#ff4da6", size: 8, opacity: .85, lines: 5, span: 24, nibRatio: .22, density: 8, particleSize: 1, textureId: DEFAULT_BRUSH_TEXTURE_ID, textureSpacing: .25, textureRotationMode: "followStroke", assistLevel: .6, fibers: 6, gravity: 42, branching: 13, curl: 12, spread: .5, wispiness: .5, wispEnergy: .5, wispMomentum: .3, wispTurbulence: 1, wispPersistence: 150, wispDensity: 5, smoothing: .35, silkStrands: 10, silkSpread: 16, silkWander: .22, silkGlow: .18 };
     this.current = null; this.construction = null; this.timer = null; this.previewFrame = null;
   }
-  getState() { return clone(this.settings); }
+  getState() { const { brush, ...state } = this.settings; return clone(state); }
   restoreState(settings) {
     if (!settings || typeof settings !== "object") return false;
     for (const [key, value] of Object.entries(settings)) {
@@ -49,14 +50,7 @@ export class DrawingController {
     const style = { brush: s.brush, version: s.brush === "fiber" || s.brush === "hair" || s.brush === "wisp" ? 2 : undefined, color: s.color, colorMode: s.colorMode, startColor: gradient ? s.gradientStartColor : s.color, endColor: gradient ? s.gradientEndColor : s.color, size: Number(s.size), opacity: Number(s.opacity), lines: Number(s.lines), span: Number(s.span), nibRatio: Number(s.nibRatio), density: Number(s.density), particleSize: Number(s.particleSize), textureId: s.textureId, spacing: Number(s.textureSpacing), rotationMode: s.textureRotationMode, assistLevel: Number(s.assistLevel), fibers: Number(s.fibers), gravity: Number(s.gravity), branching: Number(s.branching), curl: Number(s.curl), spread: Number(s.spread), wispiness: Number(s.wispiness), taper: "none", seed: Math.floor(Math.random() * 0x100000000), geometry: s.geometry, material: s.material, silkStrands: Number(s.silkStrands), silkSpread: Number(s.silkSpread), silkWander: Number(s.silkWander), silkGlow: Number(s.silkGlow) };
     return s.brush === "wisp" ? { ...style, energy: Number(s.wispEnergy), momentum: Number(s.wispMomentum), turbulence: Number(s.wispTurbulence), persistence: Number(s.wispPersistence), density: Number(s.wispDensity) } : style;
   }
-  drawable(points, style) {
-    const geometry = { type: style.geometry || (style.brush === "pen" ? "freehand" : style.brush), options: { ...style } };
-    const material = { type: style.material || "ink", color: style.color, opacity: style.opacity, width: style.size, seed: style.seed, strands: style.silkStrands, spread: style.silkSpread, wander: style.silkWander, glow: style.silkGlow, options: { ...style } };
-    // Transitional adapter: special geometries keep their established material.
-    if (geometry.type !== "freehand" || (style.material === "ink" && style.colorMode === "gradient")) material.type = "adapter";
-    if (["spray", "texture"].includes(style.material)) { geometry.type = "freehand"; material.type = "adapter"; geometry.options.brush = style.material; }
-    return { kind: "pathStroke", gesture: { points: points.map(clone), seed: style.seed }, geometry, material };
-  }
+  drawable(points, style) { return makePaintRecipe(points, style, { snapshotPoints: false }); }
   point(event) { return { x: event.clientX, y: event.clientY }; }
   map(point, current) { return screenToSourcePoint(point, current.canvas, current.mapping, this.source.width, this.source.height); }
   begin(event, canvas) {

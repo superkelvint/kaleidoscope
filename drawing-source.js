@@ -1,11 +1,11 @@
-import { brushFootprint, brushTextureId, createLiveBrushPreview, createPaintSessionRenderer, measureBrushReplay, needsStaticBrushCheckpoint, renderBrushReplay, replayBrushContours } from "./brushes.js";
 import { brushTextureCatalog } from "./brush-textures.js";
 import { paintBrushInstructions } from "./brush-painter.js";
-import { derivePath, drawableDependsOnTime, isDrawable } from "./drawable-path.js";
+import { validStrokeRecipe, validPaintSamples, validPaintSessionUpdate } from "./stroke-recipe.js";
+import { drawableDependsOnTime } from "./drawable-path.js";
 import { count, measure } from "./perf.js";
+import { StaticRunCache } from "./drawing-raster-cache.js";
 import { DrawingDocument } from "./drawing-document.js";
-import { deriveStrokeGeometry } from "./stroke-geometry.js";
-import { createMaterialSession, measureMaterialBounds, renderMaterial } from "./stroke-material.js";
+import { createStrokeLivePreview, createStrokeSession, prepareStroke, strokeDescription } from "./stroke-renderer.js";
 
 const TILE_SIZE = 1024;
 const ANTIALIAS_PADDING = 2;
@@ -28,43 +28,17 @@ function drawableForOperation(operation) {
   return operation?.drawable || null;
 }
 function rasterOperation(operation) { return { ...structuredClone(operation), drawable: drawableForOperation(operation) }; }
-function isPaintSessionDrawable(drawable) {
-  return drawable?.kind === "pathStroke" && Array.isArray(drawable.gesture?.points)
-    && drawable.gesture.points.every(point => Number.isFinite(point?.x) && Number.isFinite(point?.y));
-}
-function legacyStyle(drawable) {
-  const geometry = drawable?.geometry || {}, material = drawable?.material || {};
-  const brush = geometry.type === "freehand" ? "pen" : geometry.type;
-  return { brush, color: material.color, opacity: material.opacity, size: material.width, seed: drawable?.gesture?.seed ?? material.seed, ...geometry.options, ...material.options };
-}
-function isSharedMaterial(drawable) { return ["ink", "silk"].includes(drawable?.material?.type) && (drawable?.kind === "generatedStroke" || drawable?.geometry?.type === "freehand"); }
+function isPaintSessionDrawable(drawable) { return drawable?.kind === "pathStroke" && validStrokeRecipe(drawable); }
 function drawablePoints(drawable) { return drawable?.gesture?.points || []; }
-function strokeGeometryFor(drawable, { width, height, time = 0 } = {}) {
-  if (drawable?.kind === "pathStroke") return deriveStrokeGeometry(drawable.geometry, { gesture: drawable.gesture });
-  const path = derivePath(drawable, { width, height, time });
-  return { paths: path.contours.map(contour => deriveStrokeGeometry({ type: "generator", closed: contour.closed }, { points: contour.points }).paths[0]), instances: path.instances || [{ x: 0, y: 0 }] };
-}
-function boundsForPath(path, style) {
-  let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
-  for (const contour of path.contours || []) for (const p of contour.points || []) {
-    left = Math.min(left, p.x); right = Math.max(right, p.x); top = Math.min(top, p.y); bottom = Math.max(bottom, p.y);
-  }
-  if ((path.instances || []).length > 1) {
-    const base = { left, top, right, bottom }; left = Infinity; top = Infinity; right = -Infinity; bottom = -Infinity;
-    for (const instance of path.instances) { left = Math.min(left, base.left + instance.x); top = Math.min(top, base.top + instance.y); right = Math.max(right, base.right + instance.x); bottom = Math.max(bottom, base.bottom + instance.y); }
-  }
-  if (!Number.isFinite(left)) return null;
-  const pad = brushFootprint(style) + ANTIALIAS_PADDING;
-  return { left: Math.floor(left - pad), top: Math.floor(top - pad), right: Math.ceil(right + pad), bottom: Math.ceil(bottom + pad) };
-}
 function padBounds(bounds, padding = ANTIALIAS_PADDING) {
   return bounds && { left: Math.floor(bounds.left - padding), top: Math.floor(bounds.top - padding), right: Math.ceil(bounds.right + padding), bottom: Math.ceil(bounds.bottom + padding) };
 }
 class RenderIndex {
-  constructor() { this.operations = new Map(); this.tiles = new Map(); }
-  clear() { this.operations.clear(); this.tiles.clear(); }
+  constructor() { this.operations = new Map(); this.tiles = new Map(); this.order = new Map(); }
+  clear() { this.operations.clear(); this.tiles.clear(); this.order.clear(); }
   add(operation, bounds, materialBounds) {
     if (!operation?.id || !bounds) return;
+    if (!this.order.has(operation.id)) this.order.set(operation.id, this.order.size);
     this.operations.set(operation.id, operation);
     for (const translation of periodicTranslations(bounds, materialBounds, materialBounds)) {
       const shifted = { left: bounds.left + translation.x, top: bounds.top + translation.y, right: bounds.right + translation.x, bottom: bounds.bottom + translation.y };
@@ -73,7 +47,11 @@ class RenderIndex {
       }
     }
   }
-  forTile(x, y) { return [...(this.tiles.get(tileKey(x, y)) || [])].map(id => this.operations.get(id)).filter(Boolean); }
+  remove(id) {
+    this.operations.delete(id);
+    for (const [key, ids] of this.tiles) { ids.delete(id); if (!ids.size) this.tiles.delete(key); }
+  }
+  forTile(x, y) { return [...(this.tiles.get(tileKey(x, y)) || [])].map(id => this.operations.get(id)).filter(Boolean).sort((a, b) => this.order.get(a.id) - this.order.get(b.id)); }
 }
 function periodicTranslations(bounds, material, target) {
   if (!bounds || !material || !target) return [];
@@ -103,10 +81,6 @@ export class DrawingRasterizer {
     this.width = Math.max(1, Math.floor(width)); this.height = Math.max(1, Math.floor(height));
     this.canvas = createPaintCanvas(this.width, this.height); this.ctx = this.canvas.getContext("2d");
     this.committedCanvas = createPaintCanvas(this.width, this.height); this.committedCtx = this.committedCanvas.getContext("2d"); this.committedDirty = true;
-    // Compatibility mirrors for older integrations. They are never durable
-    // paint surfaces; tiles remain the actual cache.
-    this.baseCanvas = createPaintCanvas(this.width, this.height); this.baseCtx = this.baseCanvas.getContext("2d");
-    this.baseStaticCanvas = createPaintCanvas(this.width, this.height); this.baseStaticCtx = this.baseStaticCanvas.getContext("2d");
     this.materialBounds = { left: 0, top: 0, width: this.width, height: this.height };
     this.materialScale = 1; this.requestedPixelDensity = 1; this.materialRebuildCount = 0;
     this.tiles = new Map(); this.committedRasterGeneration = 0; this.operations = []; this.preview = null; this.livePreview = null;
@@ -120,15 +94,15 @@ export class DrawingRasterizer {
     // let a newly exposed sparse tile skip expensive off-tile brush replay.
     this.preparedDrawables = new Map();
     this.renderIndex = new RenderIndex();
-    // Kept as compatibility/introspection fields; static tile replay is now lazy.
-    this.staticPrefixEnd = 0; this.staticCheckpoints = [];
+    this.staticPrefixEnd = 0;
     this.compositionCheckpoints = [];
+    this.staticRunCaches = new Map();
     this.composeMaterial();
   }
 
   getWorldScale() { return { width: this.width, height: this.height }; }
   getFrame() { return { pixels: this.canvas, width: this.canvas.width, height: this.canvas.height, revision: this.revision, world: { origin: { x: this.materialBounds.left, y: this.materialBounds.top }, extent: { width: this.materialBounds.width, height: this.materialBounds.height }, scale: { width: this.width, height: this.height }, wrap: "repeat" } }; }
-  isDrawable(drawable) { return isDrawable(drawable) && (drawable.kind !== "pathStroke" || drawablePoints(drawable).length > 0); }
+  isDrawable(drawable) { return validStrokeRecipe(drawable) && (drawable.kind !== "pathStroke" || drawablePoints(drawable).length > 0); }
   markFrameChanged() { this.revision += 1; this.onFrameChange(); }
   perfMetadata(extra = {}) {
     return {
@@ -155,10 +129,10 @@ export class DrawingRasterizer {
   }
   advanceLivePreview(drawable) {
     let session = this.livePreview?.session;
-    if (session && !session.acceptsStyle(legacyStyle(drawable))) this.disposeLivePreview();
+    if (session && !session.acceptsDrawable(drawable)) this.disposeLivePreview();
     session = this.livePreview?.session;
     if (!session) {
-      session = createLiveBrushPreview({ ...drawable, points: drawablePoints(drawable), style: legacyStyle(drawable) });
+      session = createStrokeLivePreview(drawable);
       if (!session) return false;
       if (this.committedDirty) this.composeCommittedMaterial();
       const canvas = createPaintCanvas(this.canvas.width, this.canvas.height), context = canvas.getContext("2d");
@@ -182,6 +156,18 @@ export class DrawingRasterizer {
     context.restore(); session.finishDelta?.();
     return true;
   }
+  rebaseLivePreview() {
+    const preview = this.livePreview;
+    if (!preview) return;
+    const { context, session } = preview;
+    context.clearRect(0, 0, preview.canvas.width, preview.canvas.height); context.drawImage(this.committedCanvas, 0, 0);
+    const sx = this.canvas.width / this.materialBounds.width, sy = this.canvas.height / this.materialBounds.height;
+    context.save(); context.translate(-this.materialBounds.left * sx, -this.materialBounds.top * sy); context.scale?.(sx, sy);
+    for (const translation of periodicTranslations(session.bounds, this.materialBounds, this.materialBounds)) {
+      context.save(); context.translate(translation.x, translation.y); session.reconstruct(context); context.restore();
+    }
+    context.restore();
+  }
   captureCompositionCheckpoint() {
     if (this.paintSessions.size || this.hasImmediatePixels) return;
     if (this.operations.some(operation => drawableDependsOnTime(operation.drawable))) return;
@@ -192,6 +178,7 @@ export class DrawingRasterizer {
     if (this.compositionCheckpoints.length > 12) this.compositionCheckpoints.shift();
   }
   rebuildFrom(view, changedIndex = 0) {
+    this.invalidateStaticRuns(changedIndex);
     this.backgroundColor = view.backgroundColor;
     this.operations = view.operations.map(rasterOperation);
     this.paintSessions.clear(); this.immediateCtx.clearRect(0, 0, this.immediateCanvas.width, this.immediateCanvas.height); this.hasImmediatePixels = false; this.immediateIsComposite = false; this.activeReconcilePending = false;
@@ -208,6 +195,7 @@ export class DrawingRasterizer {
   }
   reconcileImmediateRaster() {
     this.immediateCtx.clearRect(0, 0, this.immediateCanvas.width, this.immediateCanvas.height); this.hasImmediatePixels = false; this.immediateIsComposite = false;
+    for (const session of this.paintSessions.values()) session.backdrop = null;
     this.activeReconcilePending = true;
   }
   rebuildActiveImmediateRaster() {
@@ -216,12 +204,11 @@ export class DrawingRasterizer {
     // material. Only active/finishing sessions are redrawn into the overlay.
     for (const session of this.paintSessions.values()) {
       if (!drawablePoints(session.drawable).length) continue;
-      const shared = isSharedMaterial(session.drawable);
-      const input = shared ? session.drawable : { ...session.drawable, points: drawablePoints(session.drawable), style: legacyStyle(session.drawable) };
+      const input = session.drawable;
       let batches;
       if (session.rebuildRenderer) {
         session.renderer?.dispose?.();
-        session.renderer = shared ? createMaterialSession(session.drawable) : createPaintSessionRenderer({ ...input, points: [] });
+        session.renderer = createStrokeSession(session.drawable);
         batches = session.renderer?.advance(input) || [];
         session.rebuildRenderer = false;
       } else {
@@ -230,7 +217,7 @@ export class DrawingRasterizer {
         batches = session.renderer?.reconstruct(input) || [];
       }
       session.consumed = drawablePoints(session.drawable).length;
-      this.paintSessionInstructions(batches);
+      this.paintSessionInstructions(batches, session);
     }
   }
   applyChange(change, view) {
@@ -241,15 +228,62 @@ export class DrawingRasterizer {
       else this.appendOperation(rasterOperation(change.operation));
       return true;
     }
-    if (change.type === "background") { this.backgroundColor = change.after; this.disposeLivePreview(); this.reconcileImmediateRaster(); this.invalidateCommittedView(); this.rerender(); return true; }
-    if (change.type === "clear") { this.preview = null; this.disposeLivePreview(); this.paintSessions.clear(); this.immediateCtx.clearRect(0, 0, this.immediateCanvas.width, this.immediateCanvas.height); this.hasImmediatePixels = false; this.immediateIsComposite = false; this.activeReconcilePending = false; this.operations = []; this.tiles.clear(); this.preparedDrawables.clear(); this.renderIndex.clear(); this.staticPrefixEnd = 0; this.staticCheckpoints = []; this.compositionCheckpoints = []; this.invalidateCommittedView(); this.rerender(); return true; }
+    if (change.type === "background") { this.invalidateStaticRuns(); this.backgroundColor = change.after; this.disposeLivePreview(); this.reconcileImmediateRaster(); this.invalidateCommittedView(); this.rerender(); return true; }
+    if (change.type === "clear") { this.invalidateStaticRuns(); this.preview = null; this.disposeLivePreview(); this.paintSessions.clear(); this.immediateCtx.clearRect(0, 0, this.immediateCanvas.width, this.immediateCanvas.height); this.hasImmediatePixels = false; this.immediateIsComposite = false; this.activeReconcilePending = false; this.operations = []; this.tiles.clear(); this.preparedDrawables.clear(); this.renderIndex.clear(); this.staticPrefixEnd = 0; this.compositionCheckpoints = []; this.invalidateCommittedView(); this.rerender(); return true; }
     // Replacement and undo have non-local z-order effects. Rebuild from the
     // authoritative document rather than guessing from two snapshots.
     this.rebuildFrom(view, change.index || 0); return true;
   }
-  setTime(time) { const next = Number(time); if (!Number.isFinite(next) || next === this.time) return false; this.time = next; if (!this.operations.some(op => drawableDependsOnTime(op.drawable)) && !drawableDependsOnTime(this.preview)) return false; this.reconcileImmediateRaster(); this.tiles.clear(); this.rebuildRenderIndex(); this.baseCtx.clearRect(0, 0, this.width, this.height); this.baseCtx.drawImage(this.baseStaticCanvas, 0, 0); for (let i = this.staticPrefixEnd; i < this.operations.length; i += 1) this.paintOperation(this.operations[i], this.baseCtx); this.invalidateCommittedView(); this.rerender(); return true; }
+  setTime(time) {
+    const next = Number(time); if (!Number.isFinite(next) || next === this.time) return false;
+    this.time = next;
+    const animated = this.operations.filter(operation => drawableDependsOnTime(operation.drawable));
+    if (!animated.length && !drawableDependsOnTime(this.preview)) return false;
+    if (animated.length) {
+      this.reconcileImmediateRaster();
+      // Explicit tile requests still reconstruct current pixels lazily. The
+      // animation compositor uses static runs, not full-history tile rebuilds.
+      this.committedRasterGeneration += 1;
+      for (const operation of animated) {
+        this.renderIndex.remove(operation.id);
+        this.renderIndex.add(operation, this.boundsForOperation(operation), this.materialBounds);
+      }
+      this.invalidateCommittedView();
+    }
+    this.rerender(); return true;
+  }
+  invalidateStaticRuns(changedIndex = 0) {
+    for (const [key, run] of this.staticRunCaches) if (run.end > changedIndex) this.staticRunCaches.delete(key);
+  }
+  composeAnimatedMaterial(context, transform) {
+    const used = new Set();
+    let index = 0;
+    while (index < this.operations.length) {
+      const operation = this.operations[index];
+      if (drawableDependsOnTime(operation.drawable)) {
+        this.paintOperation(operation, context, { periodic: true, transform }); index += 1; continue;
+      }
+      const start = index;
+      while (index < this.operations.length && !drawableDependsOnTime(this.operations[index].drawable)) index += 1;
+      const key = `${start === 0 ? "prefix" : "run"}:${operation.id}`;
+      used.add(key);
+      let run = this.staticRunCaches.get(key);
+      if (!run) {
+        run = new StaticRunCache({ createCanvas: createPaintCanvas, width: this.canvas.width, height: this.canvas.height, backgroundColor: start === 0 ? this.backgroundColor : null });
+        this.staticRunCaches.set(key, run);
+      }
+      for (let offset = run.operationIds.length; offset < index - start; offset += 1) {
+        const next = this.operations[start + offset];
+        this.paintOperation(next, run.context, { periodic: true, transform, painter: run.painter });
+        run.operationIds.push(next.id);
+      }
+      run.end = index; run.compositeInto(context);
+    }
+    for (const key of this.staticRunCaches.keys()) if (!used.has(key)) this.staticRunCaches.delete(key);
+  }
 
   appendOperation(operation) {
+    this.invalidateStaticRuns(this.operations.length);
     this.operations.push(operation);
     this.renderIndex.add(operation, this.boundsForOperation(operation), this.materialBounds);
     const timeDependent = drawableDependsOnTime(operation.drawable);
@@ -257,7 +291,6 @@ export class DrawingRasterizer {
     else this.appendStaticOperationToCachedTiles(operation);
     this.staticPrefixEnd = this.operations.findIndex(op => drawableDependsOnTime(op.drawable));
     if (this.staticPrefixEnd < 0) this.staticPrefixEnd = this.operations.length;
-    if (needsStaticBrushCheckpoint(legacyStyle(operation.drawable))) this.staticCheckpoints.push({ index: this.operations.length, canvas: this.baseStaticCanvas });
     if (!timeDependent && this.appendStaticOperationToCommittedView(operation)) {
       this.rerender();
     } else {
@@ -288,20 +321,15 @@ export class DrawingRasterizer {
   boundsForOperation(operation) {
     const drawable = operation?.drawable;
     if (!drawable) return null;
-    const prepared = this.prepareOperation(operation);
-    if (!prepared.dynamic) return prepared.bounds;
-    if (isSharedMaterial(drawable)) return measureMaterialBounds(strokeGeometryFor(drawable, { width: this.width, height: this.height, time: this.time }), drawable.material, { seed: drawable.gesture?.seed ?? drawable.material.seed });
-    return boundsForPath(derivePath(drawable, { width: this.width, height: this.height, time: this.time }), legacyStyle(drawable));
+    return this.prepareOperation(operation).bounds;
   }
   prepareOperation(operation) {
-    const id = operation?.id;
-    const dynamic = drawableDependsOnTime(operation?.drawable);
-    if (!dynamic && id && this.preparedDrawables.has(id)) return this.preparedDrawables.get(id);
-    const brushMeasurement = dynamic || isSharedMaterial(operation.drawable) ? null : measureBrushReplay({ ...operation.drawable, points: drawablePoints(operation.drawable), style: legacyStyle(operation.drawable) });
-    const path = dynamic || brushMeasurement ? null : derivePath(operation.drawable, { width: this.width, height: this.height, time: this.time });
-    const sharedGeometry = isSharedMaterial(operation.drawable) ? strokeGeometryFor(operation.drawable, { width: this.width, height: this.height, time: this.time }) : null;
-    const prepared = { dynamic, brushMeasurement, path, sharedGeometry, bounds: brushMeasurement ? brushMeasurement.bounds && { left: Math.floor(brushMeasurement.bounds.left - ANTIALIAS_PADDING), top: Math.floor(brushMeasurement.bounds.top - ANTIALIAS_PADDING), right: Math.ceil(brushMeasurement.bounds.right + ANTIALIAS_PADDING), bottom: Math.ceil(brushMeasurement.bounds.bottom + ANTIALIAS_PADDING) } : sharedGeometry ? measureMaterialBounds(sharedGeometry, operation.drawable.material, { seed: operation.drawable.gesture?.seed ?? operation.drawable.material.seed }) : path ? boundsForPath(path, legacyStyle(operation.drawable)) : null };
-    if (!dynamic && id) this.preparedDrawables.set(id, prepared);
+    const id = operation?.id, dynamic = drawableDependsOnTime(operation?.drawable);
+    const cached = this.preparedDrawables.get(id);
+    if (cached && (!dynamic || cached.time === this.time)) return cached;
+    count("Drawing stroke preparation", () => this.perfMetadata({ operationId: id, dynamic }));
+    const prepared = { operationId: id, ...prepareStroke(operation.drawable, { width: this.width, height: this.height, time: this.time }), dynamic, time: this.time };
+    if (id) this.preparedDrawables.set(id, prepared);
     return prepared;
   }
   operationIntersectsTile(operation, tile) {
@@ -322,7 +350,7 @@ export class DrawingRasterizer {
     return measure("Drawing tile rebuild", () => {
       tile.ctx.clearRect(0, 0, TILE_SIZE, TILE_SIZE);
       for (const operation of this.renderIndex.forTile(x, y)) {
-        count("Drawing tile history operation replay", () => this.perfMetadata({ tile: { x, y }, brush: legacyStyle(operation.drawable).brush }));
+        count("Drawing tile history operation replay", () => this.perfMetadata({ tile: { x, y }, brush: strokeDescription(operation.drawable) }));
         this.paintCachedOperation(operation, tile.ctx, { x: x * TILE_SIZE, y: y * TILE_SIZE, width: TILE_SIZE, height: TILE_SIZE });
       }
       tile.generation = this.committedRasterGeneration;
@@ -340,7 +368,7 @@ export class DrawingRasterizer {
     count("Drawing prepare material", metadata);
     if (!changed) return measure("Drawing prepare material unchanged", () => false, metadata);
     return measure("Drawing prepare material change", () => {
-      this.disposeLivePreview(); this.materialScale = nextScale;
+      this.disposeLivePreview(); this.invalidateStaticRuns(); this.materialScale = nextScale;
       const pixelWidth = Math.max(1, Math.min(MAX_MATERIAL_PIXELS, Math.round(this.materialBounds.width * nextScale)));
       const pixelHeight = Math.max(1, Math.min(MAX_MATERIAL_PIXELS, Math.round(this.materialBounds.height * nextScale)));
       this.canvas.width = pixelWidth; this.canvas.height = pixelHeight;
@@ -365,7 +393,10 @@ export class DrawingRasterizer {
     // path when it is sampled at native resolution or smaller.
     // A transparent tile cannot encode additive blending against a colored
     // backdrop. Reconstruct directly in document order in that case.
-    if (sx > 1.001 || sy > 1.001 || this.backgroundColor !== "#000000") {
+    const transform = { x: -this.materialBounds.left, y: -this.materialBounds.top, sx, sy };
+    if (this.operations.some(operation => drawableDependsOnTime(operation.drawable))) {
+      this.composeAnimatedMaterial(context, transform);
+    } else if (sx > 1.001 || sy > 1.001 || this.backgroundColor !== "#000000") {
       for (let index = 0; index < this.operations.length; index += 1) {
         const operation = this.operations[index];
         if (operation?.drawable) this.paintOperation(operation, context, { periodic: true, transform: { x: -this.materialBounds.left, y: -this.materialBounds.top, sx, sy } });
@@ -379,7 +410,7 @@ export class DrawingRasterizer {
   composeMaterial() {
     const metadata = this.perfMetadata();
     return measure("Drawing material composition", () => {
-      if (this.committedDirty) this.composeCommittedMaterial();
+      if (this.committedDirty) { this.composeCommittedMaterial(); this.rebaseLivePreview(); }
       if (this.activeReconcilePending) this.rebuildActiveImmediateRaster();
       const sx = this.canvas.width / this.materialBounds.width, sy = this.canvas.height / this.materialBounds.height;
       this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height); this.ctx.save(); this.ctx.globalAlpha = 1;
@@ -396,11 +427,12 @@ export class DrawingRasterizer {
   beginPaintSession(drawable) {
     // A transient renderer decides whether its current input prefix is visible.
     if (!isPaintSessionDrawable(drawable)) return null;
-    const textureId = brushTextureId(legacyStyle(drawable));
-    if (textureId && !brushTextureCatalog.get(textureId)) this.requestTextureReplay(textureId);
-    const renderer = isSharedMaterial(drawable) ? createMaterialSession(drawable) : createPaintSessionRenderer({ ...drawable, points: drawablePoints(drawable), style: legacyStyle(drawable) });
+    const frozen = structuredClone({ ...drawable, gesture: { ...drawable.gesture, points: [] } });
+    const renderer = createStrokeSession(frozen);
+    if (!renderer) return null;
+    if (renderer.resourceId && !brushTextureCatalog.get(renderer.resourceId)) this.requestTextureReplay(renderer.resourceId);
     const id = `paint-session-${globalThis.crypto?.randomUUID?.() || Math.random()}`;
-    this.paintSessions.set(id, { drawable: structuredClone(drawable), renderer, consumed: 0, finishing: false });
+    this.paintSessions.set(id, { drawable: frozen, renderer, consumed: 0, finishing: false });
     this.advancePaintSession(id, drawable);
     return id;
   }
@@ -417,41 +449,72 @@ export class DrawingRasterizer {
     this.immediateCanvas = composite; this.immediateCtx = context;
     this.hasImmediatePixels = true; this.immediateIsComposite = true;
   }
-  paintSessionInstructions(batches = []) {
+  paintSessionInstructions(batches = [], owner = null) {
+    if (!batches.some(batch => batch?.instructions?.length && batch.bounds)) return false;
+    if (owner?.renderer.rasterMode === "replace") {
+      // Replacement-prefix adapters repaint only their current gesture against
+      // a transient snapshot. Older finishing sessions stream into the snapshot
+      // too, so updates never replay committed artwork or consumed Wisp input.
+      if (!owner.backdrop) {
+        this.ensureCompositeImmediate();
+        owner.backdrop = createPaintCanvas(this.canvas.width, this.canvas.height);
+        owner.backdrop.getContext("2d").drawImage(this.immediateCanvas, 0, 0);
+      }
+      this.immediateCtx.clearRect(0, 0, this.immediateCanvas.width, this.immediateCanvas.height);
+      this.immediateCtx.drawImage(owner.backdrop, 0, 0);
+      this.hasImmediatePixels = true; this.immediateIsComposite = true; owner.bounds = null;
+    }
     const sx = this.canvas.width / this.materialBounds.width, sy = this.canvas.height / this.materialBounds.height;
     let painted = false;
     for (const batch of batches) {
       if (!batch?.instructions?.length || !batch.bounds) continue;
       if (batch.requiresBackdrop) this.ensureCompositeImmediate();
-      this.immediateCtx.save(); this.immediateCtx.translate(-this.materialBounds.left * sx, -this.materialBounds.top * sy); this.immediateCtx.scale?.(sx, sy);
-      for (const translation of periodicTranslations(batch.bounds, this.materialBounds, this.materialBounds)) { this.immediateCtx.save(); this.immediateCtx.translate(translation.x, translation.y); paintBrushInstructions(this.immediateCtx, batch.instructions); this.immediateCtx.restore(); }
-      this.immediateCtx.restore(); painted = true;
+      const contexts = [this.immediateCtx];
+      if (owner?.renderer.rasterMode !== "replace") for (const session of this.paintSessions.values()) {
+        if (session !== owner && session.backdrop) contexts.push(session.backdrop.getContext("2d"));
+      }
+      for (const context of contexts) {
+        context.save(); context.translate(-this.materialBounds.left * sx, -this.materialBounds.top * sy); context.scale?.(sx, sy);
+        for (const translation of periodicTranslations(batch.bounds, this.materialBounds, this.materialBounds)) { context.save(); context.translate(translation.x, translation.y); paintBrushInstructions(context, batch.instructions); context.restore(); }
+        context.restore();
+      }
+      if (owner) owner.bounds = owner.bounds ? { left: Math.min(owner.bounds.left, batch.bounds.left), top: Math.min(owner.bounds.top, batch.bounds.top), right: Math.max(owner.bounds.right, batch.bounds.right), bottom: Math.max(owner.bounds.bottom, batch.bounds.bottom) } : batch.bounds;
+      painted = true;
     }
     if (painted) this.hasImmediatePixels = true;
     return painted;
   }
   advancePaintSession(id, drawable) {
     const session = this.paintSessions.get(id);
-    if (!session || !isPaintSessionDrawable(drawable)) return false;
-    if (!session.renderer?.acceptsStyle(isSharedMaterial(drawable) ? drawable : legacyStyle(drawable))) return false;
-    if (drawablePoints(drawable).length <= session.consumed && hasChangedPaintGeometry(drawablePoints(session.drawable), drawablePoints(drawable), session.consumed)) {
+    if (!session || !validPaintSessionUpdate(drawable, session.consumed)) return false;
+    if (!session.renderer?.acceptsDrawable(drawable)) return false;
+    const next = drawablePoints(drawable), previous = drawablePoints(session.drawable);
+    const changedPrefix = next.length <= session.consumed
+      ? hasChangedPaintGeometry(previous, next, session.consumed)
+      : session.consumed > 0 && hasChangedPaintGeometry([previous[session.consumed - 1]], [next[session.consumed - 1]], 1);
+    if (changedPrefix) {
+      if (!validPaintSamples(next)) return false;
       // The active path was compacted in-place rather than extended. Its
       // previous incremental renderer cannot consume those replacement
       // samples, so rebuild the transient overlay from its current path.
       session.drawable = structuredClone(drawable); session.rebuildRenderer = true;
       this.reconcileImmediateRaster(); this.rerender(); return true;
     }
-    session.drawable = structuredClone(drawable);
-    const rendererDrawable = isSharedMaterial(drawable) ? drawable : { ...drawable, points: drawablePoints(drawable), style: legacyStyle(drawable) };
-    this.paintSessionInstructions(session.renderer.advance(rendererDrawable, session.consumed));
-    session.consumed = drawablePoints(drawable).length;
+    if (next.length > session.consumed) {
+      // The accepted prefix is session-owned and immutable. Copy only the
+      // appended samples plus the preceding sample's possible hold update.
+      if (session.consumed) previous[session.consumed - 1] = structuredClone(next[session.consumed - 1]);
+      for (let index = session.consumed; index < next.length; index += 1) previous.push(structuredClone(next[index]));
+    } else session.drawable = structuredClone(drawable);
+    this.paintSessionInstructions(session.renderer.advance(session.drawable), session);
+    session.consumed = next.length;
     this.rerender(); return true;
   }
   schedulePaintFinish(id) {
     const schedule = globalThis.requestAnimationFrame || (callback => setTimeout(() => callback(performance.now()), 16));
     schedule(() => {
       const session = this.paintSessions.get(id); if (!session || !session.finishing) return;
-      const deposited = this.paintSessionInstructions(session.renderer?.settle?.());
+      const deposited = this.paintSessionInstructions(session.renderer?.settle?.(), session);
       if (session.renderer?.isFinished) this.completePaintSession(id);
       else { if (deposited) this.rerender(); this.schedulePaintFinish(id); }
     });
@@ -468,13 +531,15 @@ export class DrawingRasterizer {
     this.completePaintSession(id); return true;
   }
   commitImmediatePaint(operation, bounds = null) {
+    this.invalidateStaticRuns(this.operations.length);
     const raster = rasterOperation(operation); this.operations.push(raster);
     this.renderIndex.add(raster, bounds ? padBounds(bounds) : this.boundsForOperation(raster), this.materialBounds);
     // A normal immediate commit promotes the pixels already deposited by the
     // PaintSession. Tiles deliberately remain stale: they are reconstructed
     // lazily from the durable recipe only if a later composition needs one.
     this.committedRasterGeneration += 1;
-    this.staticPrefixEnd = this.operations.length;
+    this.staticPrefixEnd = this.operations.findIndex(operation => drawableDependsOnTime(operation.drawable));
+    if (this.staticPrefixEnd < 0) this.staticPrefixEnd = this.operations.length;
     this.promoteImmediateRaster();
     this.rerender();
   }
@@ -506,43 +571,23 @@ export class DrawingRasterizer {
     if (operation.type === "clear") { context.clearRect(0, 0, tile?.width || this.canvas.width, tile?.height || this.canvas.height); return; }
     this.paintOperation(operation, context, { tile, periodic: true });
   }
-  paintDrawable(drawable, context = this.ctx, { preview = false, tile = null, transform = null, prepared = null, periodic = false } = {}) {
-    if (isSharedMaterial(drawable)) {
-      const sourcePath = prepared?.sharedGeometry || strokeGeometryFor(drawable, { width: this.width, height: this.height, time: this.time });
-      const bounds = prepared?.bounds || measureMaterialBounds(sourcePath, drawable.material, { seed: drawable.gesture?.seed ?? drawable.material.seed });
-      if (!bounds) return;
-      context.save();
-      if (tile) { context.beginPath?.(); context.rect?.(0, 0, tile.width, tile.height); context.clip?.(); context.translate(-tile.x, -tile.y); }
-      if (transform) { context.translate(transform.x * transform.sx, transform.y * transform.sy); context.scale?.(transform.sx, transform.sy); }
-      const target = tile ? { left: tile.x, top: tile.y, width: tile.width, height: tile.height } : this.materialBounds;
-      for (const translation of periodic ? periodicTranslations(bounds, this.materialBounds, target) : [{ x: 0, y: 0 }]) { context.save(); context.translate(translation.x, translation.y); renderMaterial(context, sourcePath, drawable.material, { seed: drawable.gesture?.seed ?? drawable.material.seed }); context.restore(); }
-      context.restore(); return;
-    }
-    const style = legacyStyle(drawable), legacyDrawable = drawable.kind === "pathStroke" ? { ...drawable, points: drawablePoints(drawable), style } : { ...drawable, style };
-    const brushMeasurement = prepared?.brushMeasurement || measureBrushReplay(legacyDrawable, { tail: !preview });
-    const path = brushMeasurement ? null : (prepared?.path || derivePath(legacyDrawable, { width: this.width, height: this.height, time: this.time })); if (!brushMeasurement && !path.contours.length) return;
-    count("Drawing brush rasterization", () => this.perfMetadata({ preview, tile: tile ? { x: tile.x, y: tile.y } : null }));
-    const textureId = brushTextureId(style);
-    if (textureId && !brushTextureCatalog.get(textureId)) { this.requestTextureReplay(textureId); return; }
+  paintDrawable(drawable, context = this.ctx, { preview = false, tile = null, transform = null, prepared = null, periodic = false, painter = null } = {}) {
+    const stroke = prepared || prepareStroke(drawable, { width: this.width, height: this.height, time: this.time }, { preview });
+    if (stroke.resourceId && !brushTextureCatalog.get(stroke.resourceId)) { this.requestTextureReplay(stroke.resourceId); return; }
+    if (!stroke.bounds) return;
+    count("Drawing stroke rasterization", () => this.perfMetadata({ operationId: prepared?.operationId, preview, tile: tile ? { x: tile.x, y: tile.y } : null }));
     context.save();
     if (tile) { context.beginPath?.(); context.rect?.(0, 0, tile.width, tile.height); context.clip?.(); context.translate(-tile.x, -tile.y); }
     if (transform) { context.translate(transform.x * transform.sx, transform.y * transform.sy); context.scale?.(transform.sx, transform.sy); }
-    const target = tile
-      ? { left: tile.x, top: tile.y, width: tile.width, height: tile.height }
-      : this.materialBounds;
-    const replay = brushMeasurement;
-    const bounds = replay ? replay.bounds && { left: replay.bounds.left - ANTIALIAS_PADDING, top: replay.bounds.top - ANTIALIAS_PADDING, right: replay.bounds.right + ANTIALIAS_PADDING, bottom: replay.bounds.bottom + ANTIALIAS_PADDING } : boundsForPath(path, style);
-    const translations = periodic
-      ? periodicTranslations(bounds, this.materialBounds, target)
-      : [{ x: 0, y: 0 }];
-    for (const translation of translations) {
-      if (replay) { context.save(); context.translate(translation.x, translation.y); renderBrushReplay(context, legacyDrawable, { tail: !preview }); context.restore(); }
-      else this.replayContours(context, path.contours, style, translation, preview);
+    const target = tile ? { left: tile.x, top: tile.y, width: tile.width, height: tile.height } : this.materialBounds;
+    for (const translation of periodic ? periodicTranslations(stroke.bounds, this.materialBounds, target) : [{ x: 0, y: 0 }]) {
+      context.save(); context.translate(translation.x, translation.y);
+      measure("Drawing stroke replay", () => stroke.render(painter || context, { preview }), () => this.perfMetadata({ preview }));
+      context.restore();
     }
     context.restore();
   }
-  replayContours(context, contours, style, translation = { x: 0, y: 0 }, preview = false) { context.save(); context.translate(translation.x, translation.y); measure("Canvas brush replay", () => replayBrushContours(context, contours, preview ? { ...style, preview: true } : style), () => this.perfMetadata({ preview, contourCount: contours.length })); context.restore(); }
-  requestTextureReplay(textureId) { if (this.pendingTextureReplays.has(textureId)) return; this.pendingTextureReplays.add(textureId); brushTextureCatalog.ensure(textureId).then(texture => { if (texture) { this.reconcileImmediateRaster(); this.tiles.clear(); this.invalidateCommittedView(); this.rerender(); } }).finally(() => this.pendingTextureReplays.delete(textureId)); }
+  requestTextureReplay(textureId) { if (this.pendingTextureReplays.has(textureId)) return; this.pendingTextureReplays.add(textureId); brushTextureCatalog.ensure(textureId).then(texture => { if (texture) { this.invalidateStaticRuns(); this.reconcileImmediateRaster(); this.tiles.clear(); this.invalidateCommittedView(); this.rerender(); } }).finally(() => this.pendingTextureReplays.delete(textureId)); }
 }
 
 /** Renderer-facing drawing source. Durable mutations are translated to ChangeSets. */
@@ -565,9 +610,6 @@ export class DrawingSource {
   get materialBounds() { return { ...this.rasterizer.materialBounds }; }
   get materialRebuildCount() { return this.rasterizer.materialRebuildCount; }
   get staticPrefixEnd() { return this.rasterizer.staticPrefixEnd; }
-  get staticCheckpoints() { return this.rasterizer.staticCheckpoints; }
-  get baseCtx() { return this.rasterizer.baseCtx; }
-  get baseStaticCtx() { return this.rasterizer.baseStaticCtx; }
   tile(...args) { return this.rasterizer.tile(...args); }
   get paintDrawable() { return this.rasterizer.paintDrawable.bind(this.rasterizer); }
   set paintDrawable(value) { this.rasterizer.paintDrawable = value; }
@@ -598,20 +640,20 @@ export class DrawingSource {
     return started ? committedId || true : null;
   }
   getContentState() { return this.document.getContentState(); }
-  restoreContentState(state) { const change = this.document.restoreContentState(state); if (!change) return false; this.rasterizer.rebuildFrom(this.document.getRenderView()); this.onDocumentChange(change); return true; }
-  canUndo() { return this.document.canUndo(); }
+  restoreContentState(state) { if (this.hasPaintSessions()) return false; const change = this.document.restoreContentState(state); if (!change) return false; this.rasterizer.rebuildFrom(this.document.getRenderView()); this.onDocumentChange(change); return true; }
+  canUndo() { return !this.hasPaintSessions() && this.document.canUndo(); }
   getDrawable(id) { return this.document.getDrawable(id); }
   findLatestDrawable(predicate) { return this.document.findLatest(predicate); }
   commitDrawable(drawable) {
-    if (drawable?.kind === "generatedStroke" && this.hasPaintSessions()) return null;
+    if (this.hasPaintSessions()) return null;
     const change = this.document.commit(drawable); if (!change) return null; this.rasterizer.applyChange(change, this.document.getRenderView()); this.onDocumentChange(change); return change.id;
   }
   beginReplaceAction(id) { return this.document.beginReplaceAction(id); }
   endReplaceAction() { this.document.endReplaceAction(); }
-  replaceDrawable(id, drawable) { if (drawable?.kind === "generatedStroke" && this.hasPaintSessions()) return false; const change = this.document.replace(id, drawable); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); this.onDocumentChange(change); return true; }
+  replaceDrawable(id, drawable) { if (this.hasPaintSessions()) return false; const change = this.document.replace(id, drawable); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); this.onDocumentChange(change); return true; }
   setBackgroundColor(color) { const change = this.document.setBackgroundColor(color); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); this.onDocumentChange(change); return true; }
-  undo() { const change = this.document.undo(); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); this.onDocumentChange(change); return true; }
-  clear() { const change = this.document.clear(); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); this.onDocumentChange(change); return true; }
+  undo() { if (this.hasPaintSessions()) return false; const change = this.document.undo(); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); this.onDocumentChange(change); return true; }
+  clear() { if (this.hasPaintSessions()) return false; const change = this.document.clear(); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); this.onDocumentChange(change); return true; }
   perfMetadata(extra) { return this.rasterizer.perfMetadata(extra); }
 }
 

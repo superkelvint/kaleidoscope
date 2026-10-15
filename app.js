@@ -1,6 +1,7 @@
 import { Renderer } from "./render.js";
 import { BitmapSource } from "./bitmap-source.js";
 import { DrawingSource } from "./drawing-source.js";
+import { makeStrokeMaterial } from "./stroke-recipe.js";
 import { DRAWING_BRUSHES, DrawingController } from "./drawing-controller.js";
 import { BRUSH_TEXTURES, DEFAULT_BRUSH_TEXTURE_ID, brushTextureCatalog } from "./brush-textures.js";
 import { wispArtistControlsForEnergy } from "./wisp-brush.js";
@@ -459,6 +460,7 @@ canvas.addEventListener("pointerdown",event=>{
     if (generatorDraft) return;
     canvas.setPointerCapture(event.pointerId);
     drawingController.begin(event, canvas);
+    refreshDrawingHistoryControls();
     drawDrawingGuides();
     return;
   }
@@ -584,8 +586,7 @@ function generatorStyleSnapshot() {
     updateCanvasCursor();
   }
   const style = drawingController.styleSnapshot();
-  if (style.material === "ink" && style.colorMode === "gradient") return { type: "adapter", color: style.color, opacity: style.opacity, width: style.size, options: { ...style, brush: "pen" } };
-  return { type: style.material, color: style.color, opacity: style.opacity, width: style.size, seed: style.seed, strands: style.silkStrands, spread: style.silkSpread, wander: style.silkWander, glow: style.silkGlow, options: { ...style, brush: "pen" } };
+  return makeStrokeMaterial({ ...style, brush: "pen" }, { generated: true, adapter: style.material === "ink" && style.colorMode === "gradient" });
 }
 function makeSpirographDraft() {
   const generator = GENERATORS.spirograph;
@@ -854,6 +855,7 @@ function syncWispControls() {
 }
 function refreshDrawingHistoryControls() {
   $("undoDrawing").disabled = !drawingSource.canUndo();
+  $("clearDrawing").disabled = drawingSource.hasPaintSessions();
 }
 $("drawingGeometry").addEventListener("change", event => {
   drawingController.setGeometry(event.target.value);

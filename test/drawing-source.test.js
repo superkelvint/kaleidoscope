@@ -1,3 +1,4 @@
+import { strokeStyle } from "../stroke-recipe.js";
 import { drawingRecipe } from "./drawing-recipe.js";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -20,14 +21,14 @@ function withSource(run) { const previous = globalThis.OffscreenCanvas; globalTh
 const drawable = () => (drawingRecipe({ kind: "pathStroke", points: [{ x: 10, y: 10 }, { x: 20, y: 20 }], style: { brush: "pen", color: "#fff", colorMode: "solid", size: 4, opacity: 1, taper: "none", seed: 1 } }));
 const fiberDrawable = (offset = 0) => (drawingRecipe({
   kind: "pathStroke", points: [{ x: 20, y: 50 + offset }, { x: 220, y: 50 + offset }],
-  style: { ...drawable().material.options, brush: "fiber", version: 2, size: 8, seed: 37, fibers: .5, gravity: 42, branching: 13, curl: 12, spread: .5, wispiness: .5, assistLevel: .55 }
+  style: { ...strokeStyle(drawable()), brush: "fiber", version: 2, size: 8, seed: 37, fibers: .5, gravity: 42, branching: 13, curl: 12, spread: .5, wispiness: .5, assistLevel: .55 }
 }));
 const wispDrawable = () => (drawingRecipe({
   kind: "pathStroke", points: [{ x: 20, y: 50 }, { x: 30, y: 54 }, { x: 42, y: 45 }, { x: 58, y: 60 }, { x: 75, y: 50 }],
-  style: { ...drawable().material.options, brush: "wisp", version: 1, size: 16, opacity: .8 }
+  style: { ...strokeStyle(drawable()), brush: "wisp", version: 1, size: 16, opacity: .8 }
 }));
-const generatedDrawable = () => (drawingRecipe({ kind: "generatedStroke", generator: "spirograph", generatorVersion: 2, config: { lobes: 5, penOffset: 1.2, reach: .1, rotation: 0, phase: 0, arms: 1 }, animation: { amount: .5, speed: .15, phase: 0 }, domain: { start: 0, end: Math.PI * 2 }, sampling: { mode: "parameter", step: .01 }, style: drawable().material.options }));
-const animatedRosette = () => (drawingRecipe({ kind: "generatedStroke", generator: "guillocheRosette", generatorVersion: 2, config: { petals: 8, secondaryFrequency: 13, primaryAmplitude: .08, secondaryAmplitude: .035, baseRadius: .2, rotation: 0, lineCount: 2, lineSpacing: .006, phaseOffset: 0 }, animation: { amount: .5, speed: .15, targets: { phaseOffset: true, secondaryAmplitude: false, secondaryFrequency: false, rotation: false } }, domain: { start: 0, end: Math.PI * 2 }, sampling: { mode: "parameter", step: .01 }, style: drawable().material.options }));
+const generatedDrawable = () => (drawingRecipe({ kind: "generatedStroke", generator: "spirograph", generatorVersion: 2, config: { lobes: 5, penOffset: 1.2, reach: .1, rotation: 0, phase: 0, arms: 1 }, animation: { amount: .5, speed: .15, phase: 0 }, domain: { start: 0, end: Math.PI * 2 }, sampling: { mode: "parameter", step: .01 }, style: strokeStyle(drawable()) }));
+const animatedRosette = () => (drawingRecipe({ kind: "generatedStroke", generator: "guillocheRosette", generatorVersion: 2, config: { petals: 8, secondaryFrequency: 13, primaryAmplitude: .08, secondaryAmplitude: .035, baseRadius: .2, rotation: 0, lineCount: 2, lineSpacing: .006, phaseOffset: 0 }, animation: { amount: .5, speed: .15, targets: { phaseOffset: true, secondaryAmplitude: false, secondaryFrequency: false, rotation: false } }, domain: { start: 0, end: Math.PI * 2 }, sampling: { mode: "parameter", step: .01 }, style: strokeStyle(drawable()) }));
 
 test("commits immutable drawables, keeps previews out of history, and exposes source-only content", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
@@ -63,7 +64,7 @@ test("paint sessions deposit before completion, persist typed records, and gate 
 test("additive material paint sessions seed their immediate raster from committed artwork", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
   source.commitDrawable(drawable());
-  const additive = drawingRecipe({ ...drawable(), style: { ...drawable().material.options, materialVersion: 1, colorMode: "gradient", startColor: "#ff0000", endColor: "#0000ff" } });
+  const additive = drawingRecipe({ ...drawable(), style: { ...strokeStyle(drawable()), materialVersion: 1, colorMode: "gradient", startColor: "#ff0000", endColor: "#0000ff" } });
   source.beginPaintSession(additive);
   assert.equal(source.rasterizer.immediateIsComposite, true);
   assert.ok(source.rasterizer.immediateCtx.calls.some(([name]) => name === "drawImage"), "committed material is copied before lighter deposition");
@@ -85,7 +86,7 @@ test("a compacted active Pen path reconciles its replacement prefix", () => with
 test("a compacted active Spray path remains a spray during reconciliation", () => withSource(() => {
   const source = new DrawingSource({ width: 2048, height: 100 });
   const points = Array.from({ length: 512 }, (_, index) => ({ x: index, y: 30 }));
-  const spray = drawingRecipe({ ...drawable(), points, style: { ...drawable().material.options, brush: "spray", density: 3, particleSize: 1 } });
+  const spray = drawingRecipe({ ...drawable(), points, style: { ...strokeStyle(drawable()), brush: "spray", density: 3, particleSize: 1 } });
   const session = source.beginPaintSession(spray);
   const context = source.rasterizer.immediateCtx;
   context.calls.length = 0;
@@ -98,7 +99,7 @@ test("a compacted active Spray path remains a spray during reconciliation", () =
 
 test("a Spray hold update retains earlier completed sprays after pixel promotion", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
-  const spray = points => (drawingRecipe({ ...drawable(), points, style: { ...drawable().material.options, brush: "spray", density: 3, particleSize: 1 } }));
+  const spray = points => (drawingRecipe({ ...drawable(), points, style: { ...strokeStyle(drawable()), brush: "spray", density: 3, particleSize: 1 } }));
   const first = source.beginPaintSession(spray([{ x: 20, y: 20 }]));
   assert.ok(source.finishPaintSession(first));
   assert.equal(source.committedDirty, false, "a completed immediate stroke promotes its visible pixels");
@@ -201,7 +202,7 @@ test("Wisp release-tail completion promotes pixels without replay", async () => 
 test("clear destructively resets drawing history and persisted content", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
   const bounds = source.materialBounds;
-  const fiber = drawingRecipe({ ...drawable(), points: Array.from({ length: 512 }, (_, index) => ({ x: index, y: index % 80 })), style: { ...drawable().material.options, brush: "fiber", version: 2, fibers: 6, gravity: 42, branching: 13, curl: 12, spread: .5, wispiness: .5, assistLevel: .6 } });
+  const fiber = drawingRecipe({ ...drawable(), points: Array.from({ length: 512 }, (_, index) => ({ x: index, y: index % 80 })), style: { ...strokeStyle(drawable()), brush: "fiber", version: 2, fibers: 6, gravity: 42, branching: 13, curl: 12, spread: .5, wispiness: .5, assistLevel: .6 } });
   source.commitDrawable(fiber);
   source.clear();
   assert.equal(source.canUndo(), false);
@@ -348,12 +349,12 @@ test("undo rebuilds derived raster state from the document ChangeSet", () => wit
   const fiber = () => (drawingRecipe({
     kind: "pathStroke",
     points: [{ x: 10, y: 10 }, { x: 90, y: 70 }],
-    style: { ...drawable().material.options, brush: "fiber", version: 2, fibers: .5, gravity: 42, branching: 13, curl: 12, spread: .5, wispiness: .5, assistLevel: .5 }
+    style: { ...strokeStyle(drawable()), brush: "fiber", version: 2, fibers: .5, gravity: 42, branching: 13, curl: 12, spread: .5, wispiness: .5, assistLevel: .5 }
   }));
   source.commitDrawable(drawable());
   source.commitDrawable(fiber());
   source.commitDrawable(drawingRecipe({ ...drawable(), points: [{ x: 60, y: 10 }, { x: 80, y: 30 }] }));
-  assert.equal(source.staticCheckpoints.at(-1).index, 2);
+  assert.equal(source.rasterizer.preparedDrawables.size, 3, "the cache contains prepared recipes for the three committed operations");
 
   let replays = 0;
   const paintOperation = source.paintOperation.bind(source);
@@ -428,23 +429,19 @@ test("source motion requests do not rebuild a fixed periodic Fiber material", ()
   assert.equal(committedCompositions, 0, "source position is not an input to material reconstruction");
 }));
 
-test("committed animation composes only the dynamic history tail", () => withSource(() => {
+test("committed animation composites static runs around the animated operation", () => withSource(() => {
   const source = new DrawingSource({ width: 100, height: 100 });
+  source.commitDrawable(drawable()); source.commitDrawable(drawable());
+  const animated = source.commitDrawable(animatedRosette());
   source.commitDrawable(drawable());
-  source.commitDrawable(drawingRecipe({ ...drawable(), points: [{ x: 30, y: 30 }, { x: 40, y: 40 }] }));
-  const animated = animatedRosette();
-  const animatedId = source.commitDrawable(animated);
-  source.commitDrawable(drawingRecipe({ ...drawable(), points: [{ x: 60, y: 60 }, { x: 70, y: 70 }] }));
-  assert.equal(source.staticPrefixEnd, 2, "only the leading static operations are baked");
-  const staticCacheCallCount = source.baseStaticCtx.calls.length;
-  const baseCallCount = source.baseCtx.calls.length;
-  assert.equal(source.setTime(1), true);
-  assert.equal(source.baseStaticCtx.calls.length, staticCacheCallCount, "static prefix is not replayed per frame");
-  const frameCalls = source.baseCtx.calls.slice(baseCallCount);
-  assert.equal(frameCalls.filter(([name]) => name === "drawImage").length, 1, "frame starts from the static raster");
-  assert.equal(frameCalls.filter(([name]) => name === "stroke").length, 2, "animated drawable and later static drawable retain ordered tail replay");
-  assert.equal(source.setTime(2), true);
-  assert.equal(source.baseStaticCtx.calls.length, staticCacheCallCount);
+  source.setTime(.5);
+  let staticPaints = 0, dynamicPaints = 0;
+  const paint = source.paintOperation;
+  source.paintOperation = (operation, ...args) => { if (operation.id === animated) dynamicPaints += 1; else staticPaints += 1; return paint(operation, ...args); };
+  source.setTime(1);
+  assert.equal(staticPaints, 0, "no static operation is rasterized into any destination");
+  assert.equal(dynamicPaints, 1);
+  assert.equal(source.rasterizer.staticRunCaches.size, 2, "one prefix and one trailing static run");
 }));
 
 test("replacement and single Undo move the static-prefix boundary around animation", () => withSource(() => {
@@ -504,7 +501,7 @@ test("compound Pen batching is exact at opacity one and debug-gated below it", (
   assert.equal(target.calls.filter(([name]) => name === "moveTo").length, 18);
   assert.equal(target.calls.filter(([name]) => name === "arc" || name === "fill").length, 0);
 
-  rosette.material.options.opacity = .85;
+  rosette.material.opacity = .85;
   const exactTarget = new FakeContext2D();
   source.paintDrawable(rosette, exactTarget);
   assert.equal(exactTarget.calls.filter(([name]) => name === "stroke").length, 18, "transparent contours retain per-contour compositing by default");
@@ -563,4 +560,165 @@ test("durable change notifications fire after asynchronous paint completion, nev
     while (queued.length) queued.shift()();
     assert.deepEqual(changes, ["append"]);
   } finally { globalThis.requestAnimationFrame = previous; }
+}));
+
+for (const pixelDensity of [1, 2]) for (const backgroundColor of ["#000000", "#241821"]) {
+  test(`animation does not rasterize or rederive static runs at density ${pixelDensity} on ${backgroundColor}`, () => withSource(() => {
+    const source = new DrawingSource({ width: 100, height: 100 });
+    source.setBackgroundColor(backgroundColor);
+    source.commitDrawable(drawable());
+    const a = source.commitDrawable(animatedRosette());
+    source.commitDrawable(fiberDrawable());
+    const b = source.commitDrawable(generatedDrawable());
+    source.commitDrawable(wispDrawable());
+    source.prepareView({ pixelDensity }); source.setTime(.5);
+    const painted = [], prepared = [], paint = source.paintOperation;
+    source.paintOperation = (operation, ...args) => { painted.push(operation.id); return paint(operation, ...args); };
+    const prepare = source.rasterizer.prepareOperation.bind(source.rasterizer);
+    source.rasterizer.prepareOperation = operation => { prepared.push(operation.id); return prepare(operation); };
+    for (const time of [1, 1.5, 2]) source.setTime(time);
+    assert.deepEqual(painted, [a, b, a, b, a, b], "count every real raster destination, including tiles and committed composition");
+    assert.ok(prepared.every(id => id === a || id === b), "static bounds and geometry are not even revisited");
+  }));
+}
+
+test("animated preview leaves committed pixels and active paint alone", () => withSource(() => {
+  const source = new DrawingSource({ width: 100, height: 100 });
+  source.commitDrawable(drawable()); source.previewDrawable(animatedRosette());
+  let compositions = 0, reconciliations = 0;
+  const compose = source.composeCommittedMaterial;
+  source.composeCommittedMaterial = () => { compositions += 1; return compose(); };
+  const reconcile = source.rasterizer.reconcileImmediateRaster.bind(source.rasterizer);
+  source.rasterizer.reconcileImmediateRaster = () => { reconciliations += 1; return reconcile(); };
+  source.setTime(1); source.setTime(2);
+  assert.equal(compositions, 0);
+  assert.equal(reconciliations, 0);
+}));
+
+test("animated runs extend after paint completion without replaying older static operations", () => withSource(() => {
+  const source = new DrawingSource({ width: 100, height: 100 });
+  source.commitDrawable(drawable());
+  const animated = source.commitDrawable(animatedRosette());
+  source.commitDrawable(drawable()); source.setTime(.5);
+  const painted = [], paint = source.paintOperation;
+  source.paintOperation = (operation, ...args) => { painted.push(operation.id); return paint(operation, ...args); };
+  const session = source.beginPaintSession(drawable());
+  const appended = source.finishPaintSession(session);
+  assert.deepEqual(painted, [], "completion remains a pixel promotion");
+  source.setTime(1);
+  assert.deepEqual(painted, [animated, appended], "only the newly appended static operation warms the existing run");
+  painted.length = 0; source.setTime(2);
+  assert.deepEqual(painted, [animated]);
+}));
+
+test("replacement, Undo, background, and density changes invalidate affected animation caches", () => withSource(() => {
+  const source = new DrawingSource({ width: 100, height: 100 });
+  const first = source.commitDrawable(drawable());
+  const animated = source.commitDrawable(animatedRosette());
+  const last = source.commitDrawable(drawable()); source.setTime(.5);
+  const prefix = [...source.rasterizer.staticRunCaches.values()][0];
+  source.replaceDrawable(last, fiberDrawable()); source.setTime(1);
+  assert.equal([...source.rasterizer.staticRunCaches.values()][0], prefix, "a trailing replacement preserves the prefix cache");
+  source.undo(); source.setTime(2);
+  source.replaceDrawable(first, fiberDrawable()); source.setTime(3);
+  assert.notEqual([...source.rasterizer.staticRunCaches.values()][0], prefix);
+  source.setBackgroundColor("#241821"); source.prepareView({ pixelDensity: 2 });
+  const paint = source.paintOperation, ids = [];
+  source.paintOperation = (operation, ...args) => { ids.push(operation.id); return paint(operation, ...args); };
+  source.setTime(4);
+  assert.deepEqual(ids, [animated], "mutations warm caches once, at the new background and density");
+}));
+
+test("document mutation cannot discard an active or finishing PaintSession", () => withSource(() => {
+  const previous = globalThis.requestAnimationFrame, queued = [];
+  globalThis.requestAnimationFrame = callback => { queued.push(callback); return queued.length; };
+  try {
+    const source = new DrawingSource({ width: 100, height: 100 });
+    const generator = source.commitDrawable(animatedRosette()), snapshot = source.getContentState();
+    const id = source.beginPaintSession(wispDrawable());
+    const assertGated = () => {
+      assert.equal(source.canUndo(), false);
+      assert.equal(source.undo(), false);
+      assert.equal(source.clear(), false);
+      assert.equal(source.replaceDrawable(generator, drawable()), false, "changing a generator into a paint record is still a retained mutation");
+      assert.equal(source.restoreContentState(snapshot), false);
+      assert.equal(source.commitDrawable(generatedDrawable()), null);
+      assert.equal(source.hasPaintSessions(), true);
+      assert.deepEqual(source.getContentState(), snapshot);
+    };
+    assertGated(); source.finishPaintSession(id); assertGated();
+    while (queued.length) queued.shift()();
+    assert.equal(source.hasPaintSessions(), false); assert.equal(source.canUndo(), true);
+  } finally { globalThis.requestAnimationFrame = previous; }
+}));
+
+test("replacement-prefix paint preserves finishing sessions without replaying their consumed input", () => withSource(() => {
+  const previous = globalThis.requestAnimationFrame, queued = [];
+  globalThis.requestAnimationFrame = callback => { queued.push(callback); return queued.length; };
+  try {
+    const source = new DrawingSource({ width: 100, height: 100 });
+    source.commitDrawable(drawable());
+    const wisp = source.beginPaintSession(wispDrawable()); source.finishPaintSession(wisp);
+    const finishing = source.rasterizer.paintSessions.get(wisp).renderer;
+    let reconstructions = 0;
+    const reconstruct = finishing.reconstruct;
+    finishing.reconstruct = (...args) => { reconstructions += 1; return reconstruct(...args); };
+    const fiber = source.beginPaintSession(fiberDrawable());
+    const transient = source.rasterizer.paintSessions.get(fiber), backdrop = transient.backdrop;
+    assert.ok(backdrop);
+    queued.shift()();
+    const extended = fiberDrawable(); extended.gesture.points.push({ x: 250, y: 55 });
+    source.updatePaintSession(fiber, extended);
+    assert.equal(transient.backdrop, backdrop, "one transient backdrop is reused");
+    assert.equal(reconstructions, 0, "older Wisp emissions stream into the snapshot instead of replaying the stroke");
+    source.finishPaintSession(fiber);
+    while (queued.length) queued.shift()();
+    assert.equal(source.operationCount, 3);
+    assert.equal(source.hasPaintSessions(), false);
+    assert.equal(JSON.stringify(source.getContentState()).includes("backdrop"), false);
+  } finally { globalThis.requestAnimationFrame = previous; }
+}));
+
+test("explicit tile reconstruction keeps document z-order after dynamic index refresh", () => withSource(() => {
+  const source = new DrawingSource({ width: 100, height: 100 });
+  const ids = [source.commitDrawable(drawable()), source.commitDrawable(animatedRosette()), source.commitDrawable(drawable()), source.commitDrawable(generatedDrawable())];
+  source.setTime(1);
+  assert.deepEqual(source.rasterizer.renderIndex.forTile(0, 0).map(operation => operation.id), ids);
+}));
+
+test("animated committed pixels rebase an accumulating preview without advancing its simulation", () => withSource(() => {
+  const source = new DrawingSource({ width: 100, height: 100 });
+  source.commitDrawable(animatedRosette()); source.previewDrawable(wispDrawable());
+  const preview = source.rasterizer.livePreview, consumed = preview.session.consumedSampleCount;
+  preview.context.calls.length = 0;
+  source.setTime(1);
+  assert.equal(source.rasterizer.livePreview, preview);
+  assert.equal(preview.session.consumedSampleCount, consumed);
+  assert.ok(preview.context.calls.some(([name, pixels]) => name === "drawImage" && pixels === source.rasterizer.committedCanvas));
+}));
+
+test("Wisp append validation and snapshots never rescan consumed input", () => withSource(() => {
+  const previous = globalThis.requestAnimationFrame, queued = [];
+  globalThis.requestAnimationFrame = callback => { queued.push(callback); return queued.length; };
+  try {
+    const source = new DrawingSource({ width: 100, height: 100 }), input = wispDrawable();
+    const id = source.beginPaintSession(input), consumed = input.gesture.points.length;
+    for (const point of input.gesture.points.slice(0, -1)) Object.defineProperty(point, "x", { enumerable: true, get() { throw new Error("consumed prefix was rescanned"); } });
+    const next = { ...input, gesture: { ...input.gesture, points: [...input.gesture.points, { x: 82, y: 45 }] } };
+    assert.equal(source.updatePaintSession(id, next), true);
+    assert.equal(source.rasterizer.paintSessions.get(id).drawable.gesture.points.length, consumed + 1);
+    source.finishPaintSession(id);
+    while (queued.length) queued.shift()();
+    assert.equal(source.operationCount, 1);
+  } finally { globalThis.requestAnimationFrame = previous; }
+}));
+
+test("session and document ownership isolate borrowed controller input from later mutation", () => withSource(() => {
+  const source = new DrawingSource({ width: 100, height: 100 }), input = drawable();
+  const id = source.beginPaintSession(input), first = input.gesture.points[0].x, count = input.gesture.points.length;
+  input.gesture.points[0].x = 999;
+  const committed = source.finishPaintSession(id);
+  input.gesture.points.push({ x: 200, y: 200 });
+  assert.equal(source.getDrawable(committed).gesture.points[0].x, first);
+  assert.equal(source.getDrawable(committed).gesture.points.length, count);
 }));

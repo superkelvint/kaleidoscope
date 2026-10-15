@@ -138,7 +138,7 @@ try {
   await page.waitForFunction(() => !window.__KALEIDOSCOPE_TEST_HOOKS__.drawingSource.hasPaintSessions(), null, { timeout: 30000 });
   assert.equal(await page.locator("#undoDrawing").isDisabled(), false, "asynchronous Wisp completion enables Undo");
   await page.waitForFunction(() => JSON.parse(localStorage.getItem("kaleidoscope.workspace.v13") || "null")?.drawing?.content?.operations?.some(operation => operation.geometry?.type === "wisp"));
-  const wispStyle = await page.evaluate(() => window.__KALEIDOSCOPE_TEST_HOOKS__.drawingSource.findLatestDrawable(() => true)?.drawable?.material?.options);
+  const wispStyle = await page.evaluate(async () => { const { strokeStyle } = await import("./stroke-recipe.js"); return strokeStyle(window.__KALEIDOSCOPE_TEST_HOOKS__.drawingSource.findLatestDrawable(() => true).drawable); });
   assert.equal(wispStyle?.brush, "wisp", "a browser Wisp gesture commits through the fixed-rate controller path");
   assert.deepEqual({ version: wispStyle?.version, energy: wispStyle?.energy, momentum: wispStyle?.momentum, turbulence: wispStyle?.turbulence, persistence: wispStyle?.persistence, density: wispStyle?.density }, { version: 2, energy: .8, momentum: .42, turbulence: 1.4, persistence: 240, density: 8 }, "the Wisp UI commits every artist control into the durable recipe");
   assert.ok(Number.isFinite(wispStyle?.wispUnitsPerPixel) && wispStyle.wispUnitsPerPixel > 0, "the browser Wisp stroke persists its frozen logical-pixel scale");
@@ -146,6 +146,7 @@ try {
   assert.equal(await page.locator("#drawingTool").inputValue(), "freehand", "Wisp tool coercion is reflected in the UI");
   await page.locator("summary").filter({ hasText: /^Generator$/ }).click();
   await page.locator("#drawingGenerator").selectOption("spirograph");
+  assert.deepEqual(errors, [], "generator selection runs without UI errors");
   const generatorBrush = await page.evaluate(() => {
     const hooks = window.__KALEIDOSCOPE_TEST_HOOKS__;
     return { control: document.querySelector("#drawingMaterial").value, controller: hooks.drawingController.settings.material, preview: hooks.drawingSource.preview?.material?.type };
@@ -173,12 +174,19 @@ try {
   console.log("Browser smoke: Ink/Silk live pixels, commit, reconstruction, and persistence");
   const materialChecks = await page.evaluate(async () => {
     const { DrawingSource } = await import("./drawing-source.js");
+    const { brushTextureCatalog } = await import("./brush-textures.js");
+    const tip = new OffscreenCanvas(8, 8), tipContext = tip.getContext("2d");
+    tipContext.fillStyle = "rgba(136,221,255,.6)"; tipContext.fillRect(1, 1, 6, 6);
+    brushTextureCatalog.loaded.set("smoke-tip", { width: 8, height: 8, tints: new Map([["#88ddff", tip]]) });
     const results = [];
-    for (const [type, background] of [["ink", "#000000"], ["silk", "#000000"], ["silk", "#241821"]]) {
+    for (const [type, background] of [["ink", "#000000"], ["silk", "#000000"], ["silk", "#241821"], ["fiber", "#241821"], ["hair", "#000000"], ["texture", "#000000"]]) {
       const source = new DrawingSource({ width: 1024, height: 1024 });
       source.setBackgroundColor(background);
       const points = [{ x: 40, y: 60 }, { x: 63, y: 65 }, { x: 80, y: 40 }, { x: 105, y: 75 }];
-      const recipe = count => ({ kind: "pathStroke", gesture: { points: points.slice(0, count), seed: 17 }, geometry: { type: "freehand" }, material: { type, color: "#88ddff", width: 5, opacity: .45, strands: 3, seed: 17 } });
+      const specialized = ["fiber", "hair", "texture"].includes(type);
+      const recipe = count => ({ kind: "pathStroke", gesture: { points: points.slice(0, count), seed: 17 }, geometry: { type: type === "texture" || !specialized ? "freehand" : type },
+        material: { type: specialized ? "adapter" : type, color: "#88ddff", width: 5, opacity: .45, strands: 3,
+          ...(specialized ? { options: type === "texture" ? { brush: type, textureId: "smoke-tip", spacing: .5, rotationMode: "followStroke" } : { brush: type, version: 2, fibers: .2, gravity: 20, branching: 0, curl: 0, spread: .5, wispiness: .5, assistLevel: .5 } } : {}) } });
       const pixels = () => source.getFrame().pixels.getContext("2d").getImageData(0, 0, 256, 256).data;
       let replays = 0;
       const paint = source.paintOperation;
@@ -215,8 +223,9 @@ try {
     // coverage and premultiplied alpha slightly differently. Limit both the
     // worst edge and total error.
     assert.ok(check.maxDifference <= 16 && check.averageDifference < .03, `${check.type} reconstructs the visible pixels: ${JSON.stringify(check)}`);
-    if (check.type === "ink") assert.equal(check.commitDifference, 0, "Ink completion never changes deposited pixels");
+    if (check.type !== "silk") assert.equal(check.commitDifference, 0, `${check.type} completion never changes deposited pixels`);
   }
+  await verifyAnimationCaching(page);
   assert.deepEqual(errors, []);
 } finally {
   await browser?.close(); server.kill("SIGTERM");
@@ -262,4 +271,67 @@ async function drawingEnergy(page) {
     for (let index = 0; index < pixels.length; index += 64) energy += pixels[index] + pixels[index + 1] + pixels[index + 2];
     return { energy, operationCount: drawingSource.operationCount, brushes: drawingSource.getContentState().operations.map(operation => operation.material?.options?.brush) };
   });
+}
+
+async function verifyAnimationCaching(page) {
+  console.log("Browser smoke: cached animation against full ordered replay");
+  const { checks, coreMaxDifference } = await page.evaluate(async () => {
+    const { DrawingSource } = await import("./drawing-source.js");
+    const { StaticRunCache } = await import("./drawing-raster-cache.js");
+    const { paintBrushInstructions } = await import("./brush-painter.js");
+    const results = [];
+    const paintRecipe = (type, points, color, opacity = .6) => ({ kind: "pathStroke", gesture: { points, seed: 19 }, geometry: { type: "freehand" }, material: { type, color, opacity, width: 9, strands: 3, spread: 7, seed: 19 } });
+    const generator = color => ({ kind: "generatedStroke", generator: "guillocheRosette", generatorVersion: 2,
+      config: { petals: 8, secondaryFrequency: 13, primaryAmplitude: .08, secondaryAmplitude: .035, baseRadius: .2, rotation: 0, lineCount: 2, lineSpacing: .006, phaseOffset: 0 },
+      animation: { amount: .5, speed: .15, targets: { phaseOffset: true, secondaryAmplitude: false, secondaryFrequency: false, rotation: false } }, domain: { start: 0, end: Math.PI * 2 }, sampling: { mode: "parameter", step: .02 }, material: { type: "ink", color, opacity: .7, width: 3 } });
+    for (const density of [1, 2]) for (const background of ["#000000", "#473223"]) {
+      const source = new DrawingSource({ width: 256, height: 256 });
+      source.setBackgroundColor(background);
+      const path = [{ x: 75, y: 110 }, { x: 120, y: 140 }, { x: 175, y: 115 }];
+      source.commitDrawable(paintRecipe("ink", path, "#2299ff"));
+      const dynamic = [source.commitDrawable(generator("#ee6677"))];
+      source.commitDrawable(paintRecipe("silk", path, "#aaffff"));
+      source.commitDrawable(paintRecipe("ink", path, "#112200", .8));
+      dynamic.push(source.commitDrawable(generator("#77cc55")));
+      source.commitDrawable(paintRecipe("ink", path, "#442266", .4));
+      source.commitDrawable(paintRecipe("silk", path, "#ffeeaa"));
+      source.prepareView({ pixelDensity: density }); source.setTime(.3);
+      const original = source.paintOperation, painted = [];
+      source.paintOperation = (operation, ...args) => { painted.push(operation.id); return original(operation, ...args); };
+      let maxDifference = 0, sum = 0, channels = 0, largeDifferences = 0;
+      for (const time of [.7, 1.2]) {
+        source.setTime(time);
+        const cached = source.getFrame().pixels.getContext("2d").getImageData(0, 0, 256 * density, 256 * density).data;
+        const reference = new OffscreenCanvas(256 * density, 256 * density), context = reference.getContext("2d");
+        context.fillStyle = background; context.fillRect(0, 0, reference.width, reference.height);
+        for (const operation of source.rasterizer.operations) original(operation, context, { periodic: true, transform: { x: 0, y: 0, sx: density, sy: density } });
+        const expected = context.getImageData(0, 0, reference.width, reference.height).data;
+        for (let index = 0; index < cached.length; index += 1) { const difference = Math.abs(cached[index] - expected[index]); maxDifference = Math.max(maxDifference, difference); sum += difference; if (difference > 24) largeDifferences += 1; }
+        channels += cached.length;
+      }
+      results.push({ density, background, painted, dynamic, maxDifference, averageDifference: sum / channels, largeDifferenceFraction: largeDifferences / channels });
+    }
+    let seed = 3, coreMaxDifference = 0;
+    const random = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 2 ** 32; };
+    const color = () => `#${Math.floor(random() * 0xffffff).toString(16).padStart(6, "0")}`;
+    for (let trial = 0; trial < 100; trial += 1) {
+      const background = color(), cache = new StaticRunCache({ createCanvas: (width, height) => new OffscreenCanvas(width, height), width: 8, height: 8 });
+      const reference = new OffscreenCanvas(8, 8), context = reference.getContext("2d"); context.fillStyle = background; context.fillRect(0, 0, 8, 8);
+      for (let index = 0; index < 20; index += 1) {
+        const instruction = { type: "circle", x: 4, y: 4, radius: 20, color: color(), opacity: random(), composite: random() < .5 ? "lighter" : "source-over" };
+        cache.painter.emit(instruction); paintBrushInstructions(context, [instruction]);
+      }
+      const output = new OffscreenCanvas(8, 8), target = output.getContext("2d"); target.fillStyle = background; target.fillRect(0, 0, 8, 8); cache.compositeInto(target);
+      const expected = context.getImageData(4, 4, 1, 1).data, actual = target.getImageData(4, 4, 1, 1).data;
+      for (let index = 0; index < 4; index += 1) coreMaxDifference = Math.max(coreMaxDifference, Math.abs(expected[index] - actual[index]));
+    }
+    return { checks: results, coreMaxDifference };
+  });
+  console.log("Animation pixel checks:", JSON.stringify({ checks: checks.map(({ density, background, maxDifference, averageDifference, largeDifferenceFraction }) => ({ density, background, maxDifference, averageDifference, largeDifferenceFraction })), coreMaxDifference }));
+  assert.ok(coreMaxDifference <= 2, "100 varied saturated/translucent blend sequences agree away from antialiased edges");
+  for (const check of checks) {
+    assert.ok(check.dynamic.every(id => typeof id === "string"), "the fixture committed real animated generators");
+    assert.deepEqual(check.painted, [...check.dynamic, ...check.dynamic], "only animated operations rasterize on a warm animation tick");
+    assert.ok(check.maxDifference <= 64 && check.averageDifference < .1 && check.largeDifferenceFraction < .001, `cached runs preserve ordered source-over/additive blends: ${JSON.stringify(check)}`);
+  }
 }

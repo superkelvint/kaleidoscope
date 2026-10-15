@@ -1,13 +1,7 @@
-import { isDrawable } from "./drawable-path.js";
-import { isStrokeMaterial } from "./stroke-material.js";
+import { normalizeStrokeRecipe, validStrokeRecipe } from "./stroke-recipe.js";
 
 const clone = value => structuredClone(value);
-const validGesture = gesture => Array.isArray(gesture?.points) && gesture.points.every(point => Number.isFinite(point?.x) && Number.isFinite(point?.y));
-const validGeometry = geometry => typeof geometry?.type === "string" && geometry.type.length > 0;
-const validDrawable = drawable => isDrawable(drawable)
-  && (drawable.kind === "generatedStroke" || validGeometry(drawable.geometry))
-  && isStrokeMaterial(drawable.material)
-  && (drawable.kind !== "pathStroke" || validGesture(drawable.gesture));
+const validDrawable = validStrokeRecipe;
 
 /** Durable semantic truth for a drawing. It intentionally owns no pixels or caches. */
 export class DrawingDocument {
@@ -49,7 +43,7 @@ export class DrawingDocument {
   endReplaceAction() { this.replaceAction = null; }
   replace(id, drawable) {
     const index = this.operations.findIndex(operation => operation.id === id);
-    if (index < 0 || !validDrawable(drawable)) return null;
+    if (index < 0 || !validDrawable(drawable) || this.operations[index].type !== (drawable.kind === "pathStroke" ? "PaintOperation" : "GeneratorOperation")) return null;
     const action = this.replaceAction?.id === id ? this.replaceAction : null;
     const before = action ? clone(action.previousDrawable) : clone(drawableForOperation(this.operations[index]));
     this.operations[index] = operationForDrawable(id, drawable);
@@ -86,45 +80,47 @@ export class DrawingDocument {
   restoreContentState(state) {
     // Schema-v3 recipes remain explicit adapter recipes so their original
     // reconstruction semantics survive the geometry/material separation.
-    if (!state || ![3, 4].includes(state.version) || "cursor" in state || typeof state.backgroundColor !== "string" || !Array.isArray(state.operations)) return null;
+    if (!state || ![3, 4].includes(state.version) || "cursor" in state || (typeof state.backgroundColor !== "string" || !state.backgroundColor.trim()) || !Array.isArray(state.operations)) return null;
     const ids = new Set(), operations = [];
     for (const saved of state.operations) {
       const operation = state.version === 3 ? migrateV3Operation(saved) : saved;
       if (!validOperation(operation) || ids.has(operation.id)) return null;
-      ids.add(operation.id); operations.push(clone(operation));
+      ids.add(operation.id); operations.push(operationForDrawable(operation.id, drawableForOperation(operation)));
     }
     this.backgroundColor = state.backgroundColor; this.operations = operations; this.lastUndo = null; this.replaceAction = null;
     return { type: "restore" };
   }
 }
 
-function drawableForOperation(operation) {
+function drawableForOperation(operation) { return clone(projectOperation(operation)); }
+function projectOperation(operation) {
   if (!operation) return null;
-  if (operation.type === "PaintOperation") return { kind: "pathStroke", gesture: clone(operation.gesture), geometry: clone(operation.geometry), material: clone(operation.material) };
+  if (operation.type === "PaintOperation") return { kind: "pathStroke", gesture: operation.gesture, geometry: operation.geometry, material: operation.material };
   if (operation.type === "GeneratorOperation") {
     const { generator, generatorVersion, config, animation, domain, sampling, material } = operation;
-    return { kind: "generatedStroke", generator, generatorVersion, config, animation, domain, sampling, geometry: { type: "generator" }, material: clone(material) };
+    return { kind: "generatedStroke", generator, generatorVersion, config, animation, domain, sampling, geometry: { type: "generator" }, material };
   }
   return null;
 }
 function operationForDrawable(id, drawable) {
+  drawable = normalizeStrokeRecipe(drawable);
   return drawable.kind === "pathStroke"
     ? { id, type: "PaintOperation", gesture: clone(drawable.gesture), geometry: clone(drawable.geometry), material: clone(drawable.material) }
     : { id, type: "GeneratorOperation", generator: drawable.generator, generatorVersion: drawable.generatorVersion, config: clone(drawable.config), animation: clone(drawable.animation), domain: clone(drawable.domain), sampling: clone(drawable.sampling), material: clone(drawable.material) };
 }
 function validOperation(operation) {
-  if (typeof operation?.id !== "string" || !operation.id) return false;
-  return validDrawable(drawableForOperation(operation));
+  if (typeof operation?.id !== "string" || !operation.id.trim()) return false;
+  return validDrawable(projectOperation(operation));
 }
 
 function migrateV3Operation(operation) {
   const style = operation?.style;
   if (!style || typeof style.brush !== "string") return null;
-  const material = { type: "adapter", color: style.color, opacity: style.opacity, width: style.size, options: { ...clone(style), schemaVersion: 3 } };
-  if (operation.type === "PaintOperation") return { id: operation.id, type: operation.type, gesture: { points: clone(operation.points), seed: style.seed }, geometry: { type: style.brush }, material };
+  const material = { type: "adapter", color: style.color, opacity: style.opacity, width: style.size, options: { ...style, schemaVersion: 3 } };
+  if (operation.type === "PaintOperation") return { id: operation.id, type: operation.type, gesture: { points: operation.points, seed: style.seed }, geometry: { type: style.brush }, material };
   if (operation.type === "GeneratorOperation") {
     const { id, type, generator, generatorVersion, config, animation, domain, sampling } = operation;
-    return clone({ id, type, generator, generatorVersion, config, animation, domain, sampling, material });
+    return { id, type, generator, generatorVersion, config, animation, domain, sampling, material };
   }
   return null;
 }

@@ -14,27 +14,54 @@ seed. Geometry and material never mutate it. Generator operations store their
 generator recipe and a material recipe; their geometry is the `generator`
 transform.
 
-`stroke-geometry.js` derives causal, prefix-stable `StrokeFrame` values. It
-supports input-point and fixed-distance sampling. `stroke-material.js` owns
-Ink and Silk and emits only `BrushPainter` instructions. Ink is one plain
-source-over round centerline. Its replay deposits the initial dab and consecutive
-round segments in the same order as live input, including translucent overlaps. Silk retains that exact centerline and adds
-seeded core, secondary, and ghost filaments derived from frame normals and
-absolute arc length; neither the filaments nor bounds are durable. Silk sessions
-keep their seeded simulation across appended input and consume the release tail
-after pointer-up. Reconstruction restores only the tail steps already shown.
-Scratch curves expire by lifespan; emission histories are not retained.
+`stroke-recipe.js` owns pure field partitioning, validation, and compatibility
+conversion. New paint recipes store samples, seed, and frozen input mapping in
+`gesture`; geometry controls in `geometry`; and palette, width, and brush
+mechanics in `material`. Neither geometry nor material stores a second complete
+style object. Generator seed/style belongs to its material recipe. The
+controller's legacy `brush` selector is a derived runtime alias, not persisted
+controller state.
 
-Gradient Pen, Ribbon, Calligraphy, Spray, Texture, Fiber/Hair, and Wisp are intentional
-transitional adapters. Their established algorithms remain in their owning
-brush modules. Wisp retains its asynchronous release tail. The adapter is
-explicit in the material recipe and must not become a source-type branch in
-the renderer.
+Transient controller recipes borrow the controller-owned sample array. The
+rasterizer freezes recipe metadata once and validates/copies only appended
+samples (plus a possible last-sample hold update). Prefix replacements receive
+full validation and reconstruction. Commit and restore take durable snapshots;
+later caller mutations cannot alter accepted samples or document history.
 
-Schema-v3 documents restore as explicit adapter recipes with their original
-material-version behavior and stable IDs. Saves use schema v4. Earlier document
-versions remain unsupported. Derived canvases,
-paint sessions, material bounds, and generated filament paths are not stored.
+`stroke-geometry.js` derives causal, prefix-stable `StrokeFrame` values, with
+input-point and fixed-distance sampling. `stroke-material.js` registers Ink and
+Silk renderers and path-session factories. Ink replay deposits the initial dab
+and consecutive round segments in the same order as live input, including
+translucent overlaps. Silk retains an exact structural spine and seeded,
+tethered filaments. Its simulation survives appended input and consumes its
+release tail after pointer-up. Reconstruction restores only tail steps already
+shown; scratch curves expire by lifespan and emissions are not retained.
+
+`stroke-renderer.js` provides one boundary for all materials:
+
+- `prepareStroke(drawable, project)` returns bounds, an optional resource ID,
+  and a `render(target, options)` method accepting backend-neutral painters.
+- `createStrokeSession(drawable)` returns frozen-recipe acceptance, `advance`,
+  `beginFinish`, `settle`, `reconstruct`, bounds, completion, and disposal.
+- An optional accumulating live-preview capability supports time-sampled input.
+
+The rasterizer neither converts old styles nor chooses a brush implementation.
+Gradient Pen, Ribbon, Calligraphy, Spray, Texture, Fiber/Hair, and Wisp use the
+registered adapter boundary; their established algorithms remain in their own
+modules. These adapters implement the same preparation/session contract. Fiber
+and Hair declare replacement-prefix raster behavior: a new prefix replaces the
+current gesture against one transient backdrop snapshot. Other finishing
+sessions stream into that snapshot without replaying consumed input. Completion
+still promotes visible pixels and drops the snapshot; it never persists a layer
+or replays a stroke to commit it.
+
+Schema-v3 and earlier schema-v4 recipes restore through pure compatibility
+conversion, retaining stable IDs, seed, mapping, and effective brush settings.
+V3 adapter material-version behavior remains explicit. Saves use canonical
+schema v4. Unsupported types, non-finite values, invalid palette/frame settings,
+non-serializable state, and duplicate IDs are rejected before mutation. Restore
+is atomic, operation type cannot change under a stable ID, and Undo remains one
+session-only slot. Earlier document versions remain unsupported.
 
 The drawing pipeline is deliberately change-driven:
 
@@ -94,14 +121,34 @@ normal session completion.
 - The workspace drawing wrapper is version 3; wrappers 1 and 2 can restore
   supported document recipes through the document migration boundary.
 
-## Performance checks
+## Animation caches and performance checks
+
+`drawing-raster-cache.js` caches consecutive static runs between animated
+operations, preserving the single document order. The first static prefix is an
+opaque material snapshot. Later runs cache source, transmission, and ceiling
+surfaces so mixed source-over/additive paint can be applied against a changing
+backdrop, including additive saturation followed by translucent paint. These
+are transient run caches at material density, not durable per-operation layers.
+No emitted-geometry history is retained. Canvas edge coverage may differ from a
+fresh path rasterization; browser comparisons bound image error and separately
+check fully covered saturated/translucent blends.
+
+Animation ticks prepare/rasterize only time-dependent operations and composite
+cached static runs. Static cache extension paints only newly appended operations.
+Changes to affected recipes, background, resolution, or texture readiness
+invalidate the relevant derived caches. The spatial index preserves document
+z-order even when dynamic bounds move. Explicit tile requests rebuild stale
+pixels lazily; the animation compositor never rebuilds full-history tiles on
+an ordinary tick. An animated draft preview does not invalidate committed paint.
 
 Static append and preview updates must not replay historical committed artwork.
-Source motion must not reconstruct or relocate the periodic material.
-Static prepared geometry should be derived once per operation ID. The target
-animation invariant is zero static derivations and rasterizations per tick.
+Source motion must not reconstruct or relocate the periodic material. Static
+prepared geometry is cached by operation ID. Verification must observe actual
+paint destinations and preparation calls, rather than compatibility counters or
+unused canvases. Warm animation ticks perform zero static preparations or
+geometry rasterizations at native and magnified material densities.
 
 Transparent tile caches cannot encode additive blending against a colored
-background. Reconstruction on colored backgrounds replays document order
-directly into the background-filled committed material. Normal immediate
-completion still promotes already-deposited pixels without replay.
+background. Non-animated reconstruction on colored backgrounds replays document
+order directly into the background-filled committed material. Normal immediate
+completion always promotes already-deposited pixels without replay.

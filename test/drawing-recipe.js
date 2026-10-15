@@ -1,13 +1,9 @@
-/** Build explicit schema-v4 recipes for raster and document tests.
- * Adapter fixtures exercise the established brush algorithms; Ink/Silk have
- * separate material tests. Overrides keep long input fixtures readable.
- */
+import { makePaintRecipe, makeStrokeMaterial, strokeStyle } from "../stroke-recipe.js";
+
+/** Compact adapter fixtures exercise established brush algorithms. Ink/Silk
+ * and the public controller have their own shared-material coverage. */
 export function drawingRecipe({ kind, points, style, gesture, geometry, material, ...recipe }) {
-  const options = style || material?.options || {};
-  return {
-    kind, ...recipe,
-    ...(kind === "pathStroke" ? { gesture: { ...gesture, seed: options.seed, points: points || gesture?.points || [] } } : {}),
-    geometry: { type: kind === "generatedStroke" ? "generator" : options.brush || geometry?.type || "pen" },
-    material: { type: "adapter", color: options.color, opacity: options.opacity, width: options.size, options: { ...options } }
-  };
+  const options = style || strokeStyle({ gesture, geometry, material });
+  if (kind === "generatedStroke") return { kind, ...recipe, geometry: { type: "generator" }, material: makeStrokeMaterial(options, { generated: true, adapter: true }) };
+  return makePaintRecipe(points || gesture?.points || [], { ...options, material: "adapter" });
 }

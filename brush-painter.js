@@ -55,3 +55,24 @@ export function paintBrushInstructions(target, instructions = []) {
     else painter.emit(instruction);
   }
 }
+
+/** Conservative source-space bounds for one backend-neutral instruction. */
+export function brushInstructionBounds(instruction, padding = 2) {
+  let points = instruction.points;
+  let pad = (Number(instruction.width) || 0) / 2 + padding;
+  if (!points) {
+    points = [{ x: instruction.x, y: instruction.y }];
+    if (instruction.type === "circle") pad = instruction.radius + padding;
+    else if (instruction.type === "ellipse") pad = Math.max(instruction.radiusX, instruction.radiusY) + padding;
+    else if (instruction.type === "image") pad = Math.hypot(instruction.width, instruction.height) / 2 + padding;
+  }
+  if (!points.length) return null;
+  let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+  for (const point of points) { left = Math.min(left, point.x); top = Math.min(top, point.y); right = Math.max(right, point.x); bottom = Math.max(bottom, point.y); }
+  return { left: left - pad, top: top - pad, right: right + pad, bottom: bottom + pad };
+}
+export function unionBrushBounds(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  return { left: Math.min(a.left, b.left), top: Math.min(a.top, b.top), right: Math.max(a.right, b.right), bottom: Math.max(a.bottom, b.bottom) };
+}

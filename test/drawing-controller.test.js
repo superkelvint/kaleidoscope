@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DrawingController } from "../drawing-controller.js";
-import { renderFiberPath } from "../fiber-brush.js";
+import { prepareStroke } from "../stroke-renderer.js";
 
 const canvas = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }) };
 const event = (type, x, y, extra = {}) => ({ type, pointerId: 1, clientX: x, clientY: y, ...extra });
@@ -43,8 +43,8 @@ test("Wisp forces freehand and stores fixed-rate duplicate samples without norma
   for (let i = 0; i < 700; i += 1) controller.deposit();
   controller.end(event("up", 40, 40));
   assert.equal(commits[0].material.options.version, 2);
-  assert.equal(commits[0].material.options.wispUnitsPerPixel, 1, "the frozen Wisp recipe persists source units per display pixel");
-  assert.ok(Number.isFinite(commits[0].material.options.wispCenterX) && Number.isFinite(commits[0].material.options.wispCenterY), "the frozen Wisp recipe persists the mapped display center");
+  assert.equal(commits[0].gesture.mapping.wispUnitsPerPixel, 1, "the frozen Wisp recipe persists source units per display pixel");
+  assert.ok(Number.isFinite(commits[0].gesture.mapping.wispCenterX) && Number.isFinite(commits[0].gesture.mapping.wispCenterY), "the frozen Wisp recipe persists the mapped display center");
   assert.ok(commits[0].gesture.points.length > 512, "Wisp's simulation samples are never decimated");
   assert.deepEqual(commits[0].gesture.points[0], commits[0].gesture.points[1], "a stationary timer tick is a real sample");
 });
@@ -73,7 +73,7 @@ test("Wisp freezes its logical-pixel scale from the gesture mapping", () => {
   controller.begin(event("down", 10, 10), wideCanvas);
   controller.deposit();
   controller.end(event("up", 10, 10));
-  assert.equal(commits[0].material.options.wispUnitsPerPixel, 2);
+  assert.equal(commits[0].gesture.mapping.wispUnitsPerPixel, 2);
 });
 
 test("Wisp pointer moves and pointerup never synthesize off-clock samples", () => {
@@ -144,7 +144,7 @@ test("controller-created Fiber strokes treat negative gravity as zero flow attra
     controller.current.style.seed = 1234;
     controller.end(event("up", 95, 100));
     const context = new FiberContext();
-    renderFiberPath(context, commits[0].gesture.points, commits[0].material.options);
+    prepareStroke(commits[0], { width: 100, height: 100 }).render(context);
     return context.strokes[0].path.at(-1).y;
   };
   assert.equal(draw(-100), draw(0), "controller snapshots do not reintroduce signed world-Y gravity");
@@ -212,12 +212,20 @@ test("material selection chooses the same brush for deposition, replay, and rest
     const style = controller.styleSnapshot(), drawable = controller.drawable([{ x: 1, y: 2 }], style);
     const expected = ["spray", "texture"].includes(material) ? material : "pen";
     assert.equal(style.brush, expected);
-    assert.equal(drawable.geometry.options.brush, expected);
-    assert.equal(drawable.material.options.brush, expected);
+    assert.equal(drawable.geometry.options?.brush, undefined, "geometry does not carry a second brush style");
+    assert.equal(drawable.material.options?.brush, ["spray", "texture"].includes(material) ? expected : undefined);
     const restored = new DrawingController({ source: {} });
     restored.restoreState(controller.getState());
     assert.deepEqual(restored.getState(), controller.getState());
   }
   controller.setBrush("wisp");
   assert.equal(controller.drawable([], controller.styleSnapshot()).geometry.type, "wisp");
+});
+
+test("transient Wisp recipes borrow the input array without copying the consumed prefix", () => {
+  const controller = new DrawingController({ source: {} }); controller.setBrush("wisp");
+  const points = [{ x: 10, y: 20 }, { x: 20, y: 25 }];
+  Object.defineProperty(points[0], "x", { enumerable: true, get() { throw new Error("consumed input was copied"); } });
+  const drawable = controller.drawable(points, controller.styleSnapshot());
+  assert.equal(drawable.gesture.points, points);
 });

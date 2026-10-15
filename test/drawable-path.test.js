@@ -1,3 +1,4 @@
+import { strokeStyle } from "../stroke-recipe.js";
 import { drawingRecipe } from "./drawing-recipe.js";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -40,8 +41,8 @@ test("spirograph derives independent arm contours and morphs deterministically w
 test("generated closed contours resolve v1 material from local curvature", () => {
   const drawable = spirograph({ style: { brush: "pen", taper: "none", materialVersion: 1, colorMode: "gradient", startColor: "#ff0000", endColor: "#0000ff", size: 4, opacity: .85, seed: 9 } });
   const contours = derivePath(drawable, { width: 200, height: 200, time: 0 }).contours, instructions = [];
-  replayBrushContours(new BrushPainter(item => instructions.push(item)), contours, drawable.material.options);
-  const energies = contours[0].points.map((_, index) => contourEnergy(contours[0].points, index, drawable.material.options.size, { closed: true }));
+  replayBrushContours(new BrushPainter(item => instructions.push(item)), contours, strokeStyle(drawable));
+  const energies = contours[0].points.map((_, index) => contourEnergy(contours[0].points, index, strokeStyle(drawable).size, { closed: true }));
   const low = energies.indexOf(Math.min(...energies)), high = energies.indexOf(Math.max(...energies));
   assert.ok(energies[high] > energies[low]);
   assert.notEqual(instructions[low].color, instructions[high].color, "tighter generator turns receive a distinct material tint");

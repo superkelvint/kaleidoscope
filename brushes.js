@@ -2,7 +2,7 @@ import { brushTextureCatalog } from "./brush-textures.js";
 import { measure } from "./perf.js";
 import { renderFiberPath } from "./fiber-brush.js";
 import { createWispLivePreview, measureWispPath, renderWispPath } from "./wisp-brush.js";
-import { BrushPainter, toBrushPainter } from "./brush-painter.js";
+import { BrushPainter, toBrushPainter, brushInstructionBounds, unionBrushBounds } from "./brush-painter.js";
 import { contourEnergy, resolveBrushMaterial } from "./brush-material.js";
 
 const TAU = Math.PI * 2;
@@ -311,18 +311,18 @@ export function createPaintSessionRenderer(drawable) {
   }
   let consumed = 0;
   const emitReplay = next => {
-    const points = next.points.slice(Math.max(0, consumed - 1));
+    if (next.points.length === consumed) return [];
+    const points = next.points;
     consumed = next.points.length;
     if (!points.length) return [];
     const instructions = [];
     replayBrushPath(new BrushPainter(instruction => instructions.push(instruction)), points, next.style);
     if (!instructions.length) return [];
-    const pad = brushFootprint(next.style) + 2;
-    const left = Math.min(...points.map(point => point.x)) - pad, right = Math.max(...points.map(point => point.x)) + pad;
-    const top = Math.min(...points.map(point => point.y)) - pad, bottom = Math.max(...points.map(point => point.y)) + pad;
-    return [{ instructions, bounds: { left, top, right, bottom }, requiresBackdrop: instructionsRequireBackdrop(instructions) }];
+    const bounds = instructions.reduce((current, instruction) => unionBrushBounds(current, brushInstructionBounds(instruction)), null);
+    return [{ instructions, bounds, requiresBackdrop: instructionsRequireBackdrop(instructions) }];
   };
   return {
+    rasterMode: "replace",
     acceptsStyle,
     advance: emitReplay,
     beginFinish() {}, settle: () => [], get isFinished() { return true; }, get bounds() { return null; },
@@ -342,12 +342,18 @@ export function createLiveBrushPreview(drawable) {
 /** Compact brush replay metadata used by the rasterizer for culling/tiling. */
 export function measureBrushReplay(drawable, { tail = true } = {}) {
   if (drawable?.kind === "pathStroke" && drawable?.style?.brush === "wisp") return measureWispPath(drawable.points, drawable.style, { tail });
+  if (drawable?.kind === "pathStroke" && ["fiber", "hair"].includes(drawable.style?.brush)) {
+    let bounds = null;
+    renderFiberPath(new BrushPainter(instruction => { bounds = unionBrushBounds(bounds, brushInstructionBounds(instruction)); }), drawable.points, drawable.style, { preview: !tail });
+    return { bounds };
+  }
   return null;
 }
 
 /** Stream a brush whose durable drawable does not first derive a contour path. */
 export function renderBrushReplay(target, drawable, { tail = true } = {}) {
   if (drawable?.kind === "pathStroke" && drawable?.style?.brush === "wisp") return renderWispPath(target, drawable.points, drawable.style, { tail });
+  if (drawable?.kind === "pathStroke" && ["fiber", "hair"].includes(drawable.style?.brush)) return renderFiberPath(target, drawable.points, drawable.style, { preview: !tail });
   return null;
 }
 

@@ -1,14 +1,8 @@
-import { BrushPainter, toBrushPainter } from "./brush-painter.js";
+import { BrushPainter, toBrushPainter, brushInstructionBounds as instructionBounds, unionBrushBounds as mergeBounds } from "./brush-painter.js";
 import { interpolateHcl } from "./brush-material.js";
 import { createStrokeFrameSession } from "./stroke-geometry.js";
 
 const clamp = value => Math.min(1, Math.max(0, Number(value) || 0));
-const bound = (points, pad) => {
-  if (!points?.length) return null;
-  let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
-  for (const point of points) { left = Math.min(left, point.x); top = Math.min(top, point.y); right = Math.max(right, point.x); bottom = Math.max(bottom, point.y); }
-  return { left: left - pad, top: top - pad, right: right + pad, bottom: bottom + pad };
-};
 const materialStyle = material => ({ color: material.color || "#ffffff", opacity: clamp(material.opacity ?? 1), width: Math.max(.1, Number(material.width ?? material.size) || 1), composite: material.composite || "source-over" });
 const spine = frame => frame.points.map(({ x, y }) => ({ x, y }));
 const finiteOr = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
@@ -48,7 +42,7 @@ function ink(painter, geometry, material) {
 }
 function createSilkPath(painter, material, context, pathIndex = 0, closed = false) {
   const style = materialStyle(material), recipe = silkParameters(material, style), seed = Number(context.seed ?? material.seed) >>> 0;
-  const palette = material.options || material, hot = { r: 220, g: 246, b: 255 };
+  const palette = material.colorMode ? material : material.options || material, hot = { r: 220, g: 246, b: 255 };
   let base = rgb(style.color), spineColor = style.color;
   const random = mulberry32(seed + pathIndex * 0x9e3779b9);
   const fibers = Array.from({ length: Math.max(1, recipe.strands) }, (_, index) => {
@@ -84,9 +78,10 @@ function createSilkPath(painter, material, context, pathIndex = 0, closed = fals
     }
     return alive;
   };
-  let previous = null;
+  let previous = null, first = null;
   return {
     append(point) {
+      first ||= point;
       if (palette.colorMode === "gradient") {
         const progress = clamp(point.arcLength / (style.width * 24)), energy = clamp(Math.abs(point.curvature) * style.width);
         spineColor = interpolateHcl(palette.startColor || style.color, palette.endColor || style.color, .84 * energy + .16 * progress);
@@ -104,6 +99,9 @@ function createSilkPath(painter, material, context, pathIndex = 0, closed = fals
       previous = point;
       for (let pass = 0; pass < 4; pass += 1) step();
     },
+    closeSpine() {
+      if (closed && first && previous !== first) painter.polyline([{ x: previous.x, y: previous.y }, { x: first.x, y: first.y }], { color: spineColor, opacity: style.opacity * .04, width: .7, composite: "lighter", cap: "round", join: "round", role: "spine" });
+    },
     settle: step,
     get isFinished() { return fibers.every(fiber => fiber.points.every(point => point.life <= 0)); },
     get scratchPointCount() { return fibers.reduce((count, fiber) => count + fiber.points.length, 0); }
@@ -114,58 +112,58 @@ function silk(painter, geometry, material, context) {
     const frame = geometry.paths[index].frame;
     const simulation = createSilkPath(painter, material, context, index, frame.closed);
     for (const point of frame.points) simulation.append(point);
+    simulation.closeSpine();
     while (!simulation.isFinished) simulation.settle();
   }
 }
 
-export const STROKE_MATERIALS = Object.freeze({ ink, silk });
+function createInkPath(painter, material) {
+  const style = materialStyle(material);
+  let previous = null;
+  return {
+    append(frame) {
+      if (previous) painter.polyline([{ x: previous.x, y: previous.y }, { x: frame.x, y: frame.y }], { ...style, cap: "round", join: "round" });
+      else painter.circle(frame.x, frame.y, style.width / 2, style);
+      previous = frame;
+    },
+    settle() {}, get isFinished() { return true; }, get scratchPointCount() { return 0; }
+  };
+}
+export const STROKE_MATERIALS = Object.freeze({
+  ink: { render: ink, createPathSession: createInkPath },
+  silk: { render: silk, createPathSession: createSilkPath }
+});
 export function renderMaterial(target, strokeGeometry, material = {}, context = {}) {
   const renderer = STROKE_MATERIALS[material.type || material.material || "ink"];
   if (!renderer) return false;
-  renderer(toBrushPainter(target), strokeGeometry, material, context); return true;
+  renderer.render(toBrushPainter(target), strokeGeometry, material, context); return true;
 }
 export function measureMaterialBounds(strokeGeometry, material = {}, context = {}) {
-  const style = materialStyle(material);
-  if ((material.type || material.material) === "silk") {
-    // Tethered fibers can briefly overshoot their homes. Measure the same
-    // deterministic recipe rather than guessing a spread-only envelope.
-    let bounds = null;
-    silk(new BrushPainter(instruction => { bounds = mergeBounds(bounds, instructionBounds(instruction)); }), strokeGeometry, material, { seed: context.seed ?? material.seed });
-    return bounds;
-  }
-  const points = (strokeGeometry.paths || []).flatMap(path => path.frame?.points || []);
-  return bound(points, style.width / 2 + 2);
+  let bounds = null;
+  renderMaterial(new BrushPainter(instruction => { bounds = mergeBounds(bounds, instructionBounds(instruction)); }), strokeGeometry, material, context);
+  return bounds;
 }
 // `adapter` is a deliberately narrow bridge for established specialized
 // materials (Spray, Texture, Fiber/Hair, Wisp); it is never rendered here.
 export function isStrokeMaterial(material) { return (material?.type || material?.material) === "adapter" || Boolean(STROKE_MATERIALS[material?.type || material?.material]); }
 
-function mergeBounds(a, b) {
-  if (!a) return b;
-  if (!b) return a;
-  return { left: Math.min(a.left, b.left), top: Math.min(a.top, b.top), right: Math.max(a.right, b.right), bottom: Math.max(a.bottom, b.bottom) };
-}
-function instructionBounds(instruction) {
-  const points = instruction.points || [{ x: instruction.x, y: instruction.y }];
-  return bound(points, (instruction.radius ?? instruction.width / 2) + 2);
-}
-
 /** Session-owned simulation. Both replay and live Silk consume the same causal
  * frames and physics; reconstruction consumes only the already-visible tail.
  * Scratch fiber curves are lifespan-bounded, and emitted batches are drained. */
 export function createMaterialSession(drawable) {
-  const fingerprint = JSON.stringify({ geometry: drawable?.geometry, material: drawable?.material });
-  const material = drawable.material, isSilk = material.type === "silk", style = materialStyle(material);
-  let inputCount, previous, sampler, simulation, delta, bounds, deltaBounds, finishing = false, tailSteps = 0;
+  const fingerprint = JSON.stringify({ geometry: drawable?.geometry, material: drawable?.material, seed: drawable?.gesture?.seed, mapping: drawable?.gesture?.mapping });
+  const material = drawable.material, renderer = STROKE_MATERIALS[material.type];
+  if (!renderer) return null;
+  let inputCount, sampler, simulation, delta, bounds, deltaBounds, finishing = false, tailSteps = 0;
   const painter = new BrushPainter(instruction => {
     delta.push(instruction);
     const footprint = instructionBounds(instruction);
     bounds = mergeBounds(bounds, footprint); deltaBounds = mergeBounds(deltaBounds, footprint);
   });
   const reset = () => {
-    inputCount = 0; previous = null; delta = []; bounds = deltaBounds = null;
+    inputCount = 0; delta = []; bounds = deltaBounds = null;
     sampler = createStrokeFrameSession(drawable.geometry.frame || drawable.geometry);
-    simulation = isSilk ? createSilkPath(painter, material, { seed: drawable.gesture?.seed ?? material.seed }) : null;
+    simulation = renderer.createPathSession(painter, material, { seed: drawable.gesture?.seed ?? material.seed });
   };
   const drain = () => {
     const instructions = delta, batchBounds = deltaBounds; delta = []; deltaBounds = null;
@@ -174,17 +172,14 @@ export function createMaterialSession(drawable) {
   const advance = next => {
     const input = next.gesture.points;
     for (let index = inputCount; index < input.length; index += 1) for (const frame of sampler.append(input[index])) {
-      if (simulation) simulation.append(frame);
-      else if (previous) painter.polyline([{ x: previous.x, y: previous.y }, { x: frame.x, y: frame.y }], { ...style, cap: "round", join: "round" });
-      else painter.circle(frame.x, frame.y, style.width / 2, style);
-      previous = frame;
+      simulation.append(frame);
     }
     inputCount = input.length;
     return drain();
   };
   reset();
   return {
-    acceptsStyle: value => JSON.stringify({ geometry: value?.geometry, material: value?.material }) === fingerprint,
+    acceptsStyle: value => JSON.stringify({ geometry: value?.geometry, material: value?.material, seed: value?.gesture?.seed, mapping: value?.gesture?.mapping }) === fingerprint,
     advance,
     beginFinish() { finishing = true; },
     settle() {
@@ -202,6 +197,6 @@ export function createMaterialSession(drawable) {
       for (let count = 0; count < visibleTailSteps; count += 1) simulation?.settle();
       return [...batches, ...drain()];
     },
-    dispose() { delta = []; simulation = null; previous = null; }
+    dispose() { delta = []; simulation = null; }
   };
 }
