@@ -6,6 +6,33 @@ Drop in a photo, painting, texture, whatever. Kaleidoscope mirrors it into a con
 
 No backend. No upload. Just WebGL in the browser.
 
+## Development and repository layout
+
+- `apps/web/`: working JavaScript/Canvas2D/WebGL application and tests.
+- `apps/flutter/`: reserved for a future Flutter Canvas prototype.
+- `graphics-spec/`: shared document and rendering contracts.
+- `fixtures/`: cross-platform inputs and reference renders.
+- `tooling/parity/`: reserved comparison tooling.
+
+With Node.js 22 or newer:
+
+```sh
+npm ci --prefix apps/web
+npm test
+npx --prefix apps/web playwright install chromium
+npm run test:browser
+npm run serve:web
+```
+
+Open `http://127.0.0.1:4173/`. For a deployable static artifact, run
+`npm run build:web`; output goes to `apps/web/dist/`. The Pages workflow checks
+the artifact under `/kaleidoscope/` before publishing it. Only runtime files
+and assets are published; tests and dependencies are excluded.
+
+Production: [Kaleidoscope](https://superkelvint.github.io/kaleidoscope/).
+Deployment is handled by `.github/workflows/web.yml` after web checks pass on
+`main`. Pull requests run the checks without deploying.
+
 ## Features
 
 - Use any image as the source

@@ -4,6 +4,16 @@ Use this file as a map, not an encyclopedia. Keep durable architecture,
 invariants, navigation hints, and verification rules here. Put detailed module
 notes and task-specific plans elsewhere.
 
+## Repository layout
+
+The web application, its assets, tests, and developer tools live in `apps/web/`.
+Module paths below are relative to that directory. Shared contracts belong in
+`graphics-spec/`, and cross-platform evidence belongs in `fixtures/`.
+`apps/flutter/` reserves space only; Flutter is not implemented yet.
+Run `npm test`, `npm run test:browser`, and `npm run build:web` from the root
+after `npm ci --prefix apps/web`. Pages publishes only the generated
+`apps/web/dist/` artifact after web verification.
+
 ## Start here
 
 | Task                                  | Read first                               |

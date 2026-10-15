@@ -1,12 +1,10 @@
 {
-  "name": "kaleidoscope",
+  "name": "kaleidoscope-monorepo",
   "private": true,
-  "type": "module",
   "scripts": {
-    "test": "node --test test/*.test.js",
-    "test:browser": "node test/browser-smoke.mjs"
-  },
-  "devDependencies": {
-    "playwright": "1.57.0"
+    "test": "npm --prefix apps/web test",
+    "test:browser": "npm --prefix apps/web run test:browser",
+    "build:web": "npm --prefix apps/web run build",
+    "serve:web": "npm --prefix apps/web run serve"
   }
 }

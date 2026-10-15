@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { chromium } from "playwright";
 
-const server = spawn(process.execPath, ["tools/test-server.mjs"], { stdio: "ignore" });
+const baseURL = process.env.SMOKE_URL || "http://127.0.0.1:4173/kaleidoscope/";
+const server = process.env.SMOKE_URL ? null : spawn(process.execPath, ["tools/test-server.mjs"], { stdio: "ignore", env: { ...process.env, BASE_PATH: "/kaleidoscope/" } });
 const errors = [];
 let browser;
 try {
@@ -16,7 +17,7 @@ try {
     if (!sessionStorage.getItem("kaleidoscope-smoke-initialized")) { localStorage.clear(); sessionStorage.setItem("kaleidoscope-smoke-initialized", "1"); }
     window.__KALEIDOSCOPE_TEST_HOOKS__ = true;
   });
-  await page.goto("http://127.0.0.1:4173/", { waitUntil: "networkidle" });
+  await page.goto(baseURL, { waitUntil: "networkidle" });
   const canvas = page.locator("#gl"); await assertVisible(canvas);
   await page.locator("#sourceDrawing").click();
   await page.evaluate(() => {
@@ -228,7 +229,7 @@ try {
   await verifyAnimationCaching(page);
   assert.deepEqual(errors, []);
 } finally {
-  await browser?.close(); server.kill("SIGTERM");
+  await browser?.close(); server?.kill("SIGTERM");
 }
 
 async function assertVisible(locator) { assert.ok(await locator.isVisible(), "WebGL canvas is visible"); }
