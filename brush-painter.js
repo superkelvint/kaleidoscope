@@ -20,6 +20,14 @@ export class CanvasBrushPainter extends BrushPainter {
     const ctx = this.ctx, alpha = instruction.opacity ?? 1;
     ctx.save(); ctx.globalAlpha = alpha;
     if (instruction.composite) ctx.globalCompositeOperation = instruction.composite;
+    if (instruction.type === "polyline" && instruction.incremental) {
+      // Replay immediate centerline deposition in input order. One native
+      // stroke would blend translucent joins differently from live segments.
+      const { points, incremental, ...style } = instruction;
+      this.paint({ ...style, type: "circle", x: points[0].x, y: points[0].y, radius: style.width / 2 });
+      for (let index = 1; index < points.length; index += 1) this.paint({ ...style, type: "polyline", points: [points[index - 1], points[index]] });
+      ctx.restore(); return;
+    }
     if (instruction.type === "polyline") {
       ctx.strokeStyle = instruction.color; ctx.lineWidth = instruction.width;
       ctx.lineCap = instruction.cap || "round"; ctx.lineJoin = instruction.join || "round";

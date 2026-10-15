@@ -1,6 +1,7 @@
 import { measure } from "./perf.js";
 import { toBrushPainter } from "./brush-painter.js";
 import { resolveBrushMaterial } from "./brush-material.js";
+import { deriveFiberCompatibleFrame } from "./stroke-geometry.js";
 
 // Deterministic Canvas2D material brush.  This module deliberately knows
 // nothing about pointers, sources, WebGL, or symmetry.
@@ -46,7 +47,7 @@ function gradient(style, u) {
 function colorString(rgb, light = 0) {
   return `rgb(${rgb.map(value => Math.round(lerp(value, 255, light))).join(",")})`;
 }
-function usesSharedMaterial(style) { return Number(style?.materialVersion) === 1; }
+function usesSharedMaterial(style) { return style.schemaVersion !== 3 || Number(style.materialVersion) === 1; }
 function fiberMaterial(style, { progress = 0, phase = 0, generation = 0, core = false } = {}) {
   if (!usesSharedMaterial(style)) return null;
   return resolveBrushMaterial(style, {
@@ -194,62 +195,10 @@ function rotate(x, y, angle) {
   const cosine = Math.cos(angle), sine = Math.sin(angle);
   return { x: x * cosine - y * sine, y: x * sine + y * cosine };
 }
-function stableMasterSamples(points) {
-  if (!Array.isArray(points) || points.length < 2) return [];
-  const distances = [0];
-  for (let i = 1; i < points.length; i += 1) distances.push(distances[i - 1] + Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y));
-  const length = distances.at(-1);
-  if (length < .01) return [];
-  const count = Math.min(V2.maxMasterSamples, Math.max(2, Math.floor(length / V2.sampleSpacing) + 1));
-  const output = [];
-  let cursor = 1;
-  for (let i = 0; i < count; i += 1) {
-    const arcLength = i * V2.sampleSpacing;
-    while (cursor < distances.length - 1 && distances[cursor] < arcLength) cursor += 1;
-    const before = cursor - 1, span = distances[cursor] - distances[before] || 1;
-    const ratio = clamp((arcLength - distances[before]) / span);
-    output.push({ x: lerp(points[before].x, points[cursor].x, ratio), y: lerp(points[before].y, points[cursor].y, ratio), arcLength });
-  }
-  return output;
-}
-
 /** A causal, fixed-distance flow field used by Fiber recipe version 2. */
 export function deriveFiberMasterPath(points) {
-  const raw = stableMasterSamples(points);
-  if (raw.length < 2) return [];
-  const path = raw.map((point, index) => {
-    // Causal smoothing means completed samples do not move when input grows.
-    const prior = raw[Math.max(0, index - 1)], prior2 = raw[Math.max(0, index - 2)];
-    return {
-      x: index < 2 ? point.x : point.x * .58 + prior.x * .30 + prior2.x * .12,
-      y: index < 2 ? point.y : point.y * .58 + prior.y * .30 + prior2.y * .12,
-      arcLength: point.arcLength,
-      t: point.arcLength / Math.max(V2.sampleSpacing, raw.at(-1).arcLength)
-    };
-  });
-  const angles = [];
-  for (let i = 0; i < path.length; i += 1) {
-    const before = path[Math.max(0, i - 4)], after = path[i];
-    const dx = after.x - before.x, dy = after.y - before.y, magnitude = Math.hypot(dx, dy) || 1;
-    path[i].tangentX = dx / magnitude; path[i].tangentY = dy / magnitude;
-    path[i].normalX = -dy / magnitude; path[i].normalY = dx / magnitude;
-    angles.push(Math.atan2(dy, dx));
-  }
-  path[0].tangentX = path[1].tangentX; path[0].tangentY = path[1].tangentY;
-  path[0].normalX = path[1].normalX; path[0].normalY = path[1].normalY;
-  const rawCurvature = angles.map((angle, index) => {
-    if (!index) return 0;
-    let delta = angle - angles[Math.max(0, index - 3)];
-    while (delta > Math.PI) delta -= TAU;
-    while (delta < -Math.PI) delta += TAU;
-    return clamp(Math.abs(delta) / .85);
-  });
-  for (let i = 0; i < path.length; i += 1) {
-    let total = 0, weight = 0;
-    for (let j = Math.max(0, i - 4); j <= i; j += 1) { const w = j === i ? 3 : 1; total += rawCurvature[j] * w; weight += w; }
-    path[i].curvature = clamp(total / weight);
-  }
-  return path;
+  return deriveFiberCompatibleFrame(points, { spacing: V2.sampleSpacing, maxSamples: V2.maxMasterSamples });
+
 }
 
 function sampleMaster(master, arcLength) {

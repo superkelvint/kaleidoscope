@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { BRUSHES, canReplayBrushPath, colorAtPathPosition, createImmediateBrushSession, createPaintSessionRenderer, replayBrushContours, replayBrushPath } from "../brushes.js";
 import { brushTextureCatalog } from "../brush-textures.js";
+import { contourEnergy, resolveBrushMaterial } from "../brush-material.js";
 import { BrushPainter } from "../brush-painter.js";
 
 class FakeContext2D {
@@ -48,7 +49,7 @@ function assertV1LiveRebuildAndReplayMatch(style, points) {
 test("transient paint-session renderers expose brush-neutral batches and backdrop capability", () => {
   const pen = createPaintSessionRenderer({ kind: "pathStroke", points: [], style: { ...options, brush: "pen", taper: "none" } });
   const penBatches = pen.advance({ kind: "pathStroke", points: [{ x: 10, y: 12 }], style: { ...options, brush: "pen", taper: "none" } });
-  assert.equal(penBatches[0].requiresBackdrop, false);
+  assert.equal(penBatches[0].requiresBackdrop, true, "adapter Pen deposits additive material");
   assert.ok(penBatches[0].instructions.length);
   assert.ok(penBatches[0].bounds.left < 10);
 
@@ -195,7 +196,7 @@ test("replay retains timed Spray and Texture hold deposition", () => {
   brushTextureCatalog.loaded.delete(id);
 });
 
-test("gradient brush styles interpolate from the first path stamp to the last", () => {
+test("gradient adapter material combines local energy with causal progress", () => {
   const style = { ...options, brush: "pen", colorMode: "gradient", startColor: "#ff0000", endColor: "#0000ff" };
   assert.equal(colorAtPathPosition(style, 0), "#ff0000");
   assert.equal(colorAtPathPosition(style, .5), "#800080");
@@ -203,17 +204,22 @@ test("gradient brush styles interpolate from the first path stamp to the last", 
 
   const ctx = new FakeContext2D();
   replayBrushPath(ctx, [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 20, y: 0 }], style);
-  assert.deepEqual(ctx.calls.filter(([name]) => name === "fillStyle").map(([, color]) => color), ["#ff0000", "#800080", "#0000ff"]);
+  const points = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 20, y: 0 }];
+  const expected = points.map((_, index) => resolveBrushMaterial(style, {
+    energy: contourEnergy(points, index, style.size),
+    progress: index > 1 ? 10 / (style.size * 24) : 0, profile: "additive", opacityScale: style.opacity
+  }).color);
+  assert.deepEqual(ctx.calls.filter(([name]) => name === "fillStyle").map(([, color]) => color), expected);
 });
 
-test("materialVersion 1 changes only deterministic Pen material, not replay geometry", () => {
+test("adapter Pen material no longer depends on the removed materialVersion switch", () => {
   const path = [{ x: 0, y: 0 }, { x: 10, y:0 }, { x: 30, y: 0 }];
   const legacy = [], shared = [];
   const style = { ...options, brush: "pen", taper: "sine", colorMode: "gradient", startColor: "#ff0000", endColor: "#0000ff" };
   replayBrushPath(new BrushPainter(item => legacy.push(item)), path, style);
   replayBrushPath(new BrushPainter(item => shared.push(item)), path, { ...style, materialVersion: 1 });
   assert.deepEqual(shared.map(({ x, y, radius }) => ({ x, y, radius })), legacy.map(({ x, y, radius }) => ({ x, y, radius })));
-  assert.notDeepEqual(shared.map(item => item.color), legacy.map(item => item.color));
+  assert.deepEqual(shared, legacy);
   assert.ok(shared.every(item => item.composite === "lighter"));
 });
 
@@ -264,22 +270,24 @@ test("materialVersion 1 live paint reconstructs identical pixel-input instructio
   assert.deepEqual(rebuilt, live);
 });
 
-test("solid materialVersion 1 Pen bypasses legacy native replay and retains additive instructions", () => {
+test("solid untapered adapter Pen uses one native source-over centerline", () => {
   const instructions = [];
   replayBrushPath(new BrushPainter(item => instructions.push(item)), [{ x: 0, y: 0 }, { x: 20, y: 0 }], {
     ...options, brush: "pen", taper: "none", colorMode: "solid", color: "#22aa66", materialVersion: 1
   });
-  assert.equal(instructions.length, 2, "v1 uses per-sample material instructions rather than one native polyline");
-  assert.ok(instructions.every(item => item.color === "#22aa66" && item.composite === "lighter"));
+  assert.equal(instructions.length, 1);
+  assert.equal(instructions[0].type, "polyline");
+  assert.ok(instructions.every(item => item.color === "#22aa66" && !item.composite));
 });
 
-test("materialVersion 1 contour replay keeps solid generated-Pen semantics", () => {
+test("solid adapter Pen contour replay preserves the closed centerline", () => {
   const instructions = [];
   replayBrushContours(new BrushPainter(item => instructions.push(item)), [{ points: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }], closed: true }], {
     ...options, brush: "pen", taper: "none", colorMode: "solid", materialVersion: 1
   });
-  assert.equal(instructions.length, 3);
-  assert.ok(instructions.every(item => item.composite === "lighter"));
+  assert.equal(instructions.length, 1);
+  assert.equal(instructions[0].closed, true);
+  assert.equal(instructions[0].type, "polyline");
 });
 
 test("texture replay uses cached tips, size-relative spacing, and stable path rotation", () => {
@@ -297,18 +305,27 @@ test("texture replay uses cached tips, size-relative spacing, and stable path ro
   brushTextureCatalog.loaded.delete(id);
 });
 
-test("texture replay applies the existing gradient color path through cached tint variants", () => {
-  const id = "gradient-tip";
-  const red = { width: 10, height: 10 }, purple = { width: 10, height: 10 }, blue = { width: 10, height: 10 };
-  brushTextureCatalog.loaded.set(id, {
-    width: 10, height: 10,
-    tints: new Map([["#ff0000", red], ["#800080", purple], ["#0000ff", blue]])
-  });
-  const ctx = new FakeContext2D();
-  replayBrushPath(ctx, [{ x: 0, y: 0 }, { x: 20, y: 0 }], {
-    ...options, brush: "texture", textureId: id, spacing: 1, colorMode: "gradient",
-    startColor: "#ff0000", endColor: "#0000ff", rotationMode: "followStroke"
-  });
-  assert.deepEqual(ctx.calls.filter(([name]) => name === "drawImage").map(([, tip]) => tip), [red, purple, blue]);
-  brushTextureCatalog.loaded.delete(id);
+test("texture replay resolves quantized material colors before requesting cached tips", () => {
+  const originalTip = brushTextureCatalog.getTintedTip, colors = [];
+  brushTextureCatalog.getTintedTip = (id, color) => { colors.push(color); return { width: 10, height: 10 }; };
+  try {
+    const style = { ...options, brush: "texture", textureId: "gradient-tip", spacing: 1,
+      colorMode: "gradient", startColor: "#ff0000", endColor: "#0000ff", rotationMode: "followStroke" };
+    replayBrushPath(new FakeContext2D(), [{ x: 0, y: 0 }, { x: 20, y: 0 }], style);
+    assert.deepEqual(colors, [0, 10, 20].map(distance => resolveBrushMaterial(style, {
+      energy: distance ? contourEnergy([{ x: 0, y: 0 }, { x: 20, y: 0 }], 1, style.size) : 0,
+      progress: distance / (style.size * 24), profile: "texture", colorSteps: 32, opacityScale: style.opacity
+    }).color));
+  } finally { brushTextureCatalog.getTintedTip = originalTip; }
+});
+
+test("migrated v3 Pen retains both legacy gradients and versioned additive deposition", () => {
+  const path = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 20, y: 0 }];
+  const legacy = new FakeContext2D();
+  replayBrushPath(legacy, path, { ...options, schemaVersion: 3, brush: "pen", colorMode: "gradient", startColor: "#ff0000", endColor: "#0000ff" });
+  assert.deepEqual(legacy.calls.filter(([name]) => name === "fillStyle").map(([, color]) => color), ["#ff0000", "#800080", "#0000ff"]);
+  const shared = [];
+  replayBrushPath(new BrushPainter(item => shared.push(item)), path, { ...options, schemaVersion: 3, materialVersion: 1, brush: "pen", taper: "none", colorMode: "solid" });
+  assert.equal(shared.length, path.length);
+  assert.ok(shared.every(item => item.type === "circle" && item.composite === "lighter"));
 });

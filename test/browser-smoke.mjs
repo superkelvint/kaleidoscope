@@ -9,9 +9,13 @@ try {
   await new Promise(resolve => setTimeout(resolve, 300));
   browser = await chromium.launch({ headless: true, args: ["--enable-webgl", "--use-angle=swiftshader"] });
   const page = await browser.newPage({ viewport: { width: 1200, height: 800 }, deviceScaleFactor: 1 });
+  page.setDefaultTimeout(15000);
   page.on("pageerror", error => errors.push(error.message));
   page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
-  await page.addInitScript(() => { localStorage.clear(); window.__KALEIDOSCOPE_TEST_HOOKS__ = true; });
+  await page.addInitScript(() => {
+    if (!sessionStorage.getItem("kaleidoscope-smoke-initialized")) { localStorage.clear(); sessionStorage.setItem("kaleidoscope-smoke-initialized", "1"); }
+    window.__KALEIDOSCOPE_TEST_HOOKS__ = true;
+  });
   await page.goto("http://127.0.0.1:4173/", { waitUntil: "networkidle" });
   const canvas = page.locator("#gl"); await assertVisible(canvas);
   await page.locator("#sourceDrawing").click();
@@ -23,6 +27,7 @@ try {
       zoom: 2, panX: 1.4, panY: 0, animate: false, feedbackAmount: 0, bloomStrength: 0
     }, { preview: false });
   });
+  console.log("Browser smoke: Ink and Undo");
   await draw(page, canvas, 140);
   const drawnPen = await page.evaluate(async () => {
     await new Promise(requestAnimationFrame);
@@ -58,15 +63,17 @@ try {
   assert.equal(await page.locator("#redoDrawing").count(), 0, "Redo control has been removed");
   await page.locator("#undoDrawing").click();
   assert.equal(await page.evaluate(() => window.__KALEIDOSCOPE_TEST_HOOKS__.drawingSource.operationCount), 0, "Undo removes the latest drawing");
-  await page.locator("#undoDrawing").click();
-  assert.equal(await page.evaluate(() => window.__KALEIDOSCOPE_TEST_HOOKS__.drawingSource.operationCount), 0, "a second Undo is consumable and does nothing");
-  await page.locator("#drawingBrush").selectOption("spray");
+  assert.equal(await page.locator("#undoDrawing").isDisabled(), true, "the single Undo has been consumed");
+  assert.equal(await page.evaluate(() => window.__KALEIDOSCOPE_TEST_HOOKS__.drawingSource.undo()), false, "a second Undo does nothing");
+  console.log("Browser smoke: Spray");
+  await page.locator("#drawingMaterial").selectOption("spray");
   await page.locator("#drawingDensity").evaluate(input => { input.value = "3"; input.dispatchEvent(new Event("input", { bubbles: true })); });
   await drawSpray(page, canvas, 270);
   const firstSpray = await drawingEnergy(page);
   await drawSpray(page, canvas, 350);
   const secondSpray = await drawingEnergy(page);
-  assert.equal(secondSpray.operationCount, 2, "two browser Spray gestures both commit through the controller");
+  assert.deepEqual(errors, [], "browser drawing emits no runtime errors");
+  assert.equal(secondSpray.operationCount, 2, `two browser Spray gestures both commit through the controller: ${JSON.stringify(secondSpray)}`);
   assert.equal(secondSpray.brushes.every(brush => brush === "spray"), true, "the committed gestures retain Spray rather than falling back to Pen");
   assert.ok(secondSpray.energy > firstSpray.energy, "a later timed Spray gesture retains the earlier committed spray");
   await page.locator("#sourceImage").click();
@@ -81,6 +88,7 @@ try {
     return gl ? gl.getError() : -1;
   });
   assert.equal(webglErrors, 0, "WebGL reports no errors");
+  console.log("Browser smoke: periodic material and generator animation");
   const periodicDrift = await page.evaluate(async () => {
     const { drawingSource, renderer } = window.__KALEIDOSCOPE_TEST_HOOKS__;
     const energy = () => {
@@ -101,7 +109,7 @@ try {
     const largePan = await present({ animate: false, panX: 100, panY: 100, rotationDeg: 0 });
     const rotated = await present({ animate: false, panX: 0, panY: 0, rotationDeg: 3600 });
     const afterMotionRevision = drawingSource.revision, afterMotionMaterial = drawingSource.materialBounds, afterMotionRebuilds = drawingSource.materialRebuildCount, afterMotionDiagnostics = renderer.getSourceDiagnostics();
-    const animatedId = drawingSource.commitDrawable({ kind: "generatedStroke", generator: "guillocheRosette", generatorVersion: 2, config: { petals: 8, secondaryFrequency: 13, primaryAmplitude: .08, secondaryAmplitude: .035, baseRadius: .2, rotation: 0, lineCount: 2, lineSpacing: .006, phaseOffset: 0 }, animation: { amount: .5, speed: .15, targets: { phaseOffset: true, secondaryAmplitude: false, secondaryFrequency: false, rotation: false } }, domain: { start: 0, end: Math.PI * 2 }, sampling: { mode: "parameter", step: .01 }, style: { brush: "pen", color: "#ffffff", colorMode: "solid", size: 4, opacity: 1, taper: "none", seed: 3 } });
+    const animatedId = drawingSource.commitDrawable({ kind: "generatedStroke", generator: "guillocheRosette", generatorVersion: 2, config: { petals: 8, secondaryFrequency: 13, primaryAmplitude: .08, secondaryAmplitude: .035, baseRadius: .2, rotation: 0, lineCount: 2, lineSpacing: .006, phaseOffset: 0 }, animation: { amount: .5, speed: .15, targets: { phaseOffset: true, secondaryAmplitude: false, secondaryFrequency: false, rotation: false } }, domain: { start: 0, end: Math.PI * 2 }, sampling: { mode: "parameter", step: .01 }, material: { type: "ink", color: "#ffffff", width: 4, opacity: 1, seed: 3 } });
     const animatedStart = drawingSource.revision;
     const mirrorRadial = await present({ animate: false, currentTime: 1, symmetryMode: "mirrorRadial", wallpaperMode: "single", panX: 0, panY: 0, rotationDeg: 0 });
     const p6m = await present({ animate: false, currentTime: 2, symmetryMode: "radial", wallpaperMode: "p6m", panX: 0, panY: 0, rotationDeg: 0 });
@@ -116,25 +124,99 @@ try {
   assert.deepEqual(periodicDrift.afterMaterial, periodicDrift.material, "source motion does not move the repeat domain");
   assert.equal(periodicDrift.afterRebuilds, periodicDrift.rebuilds, "source motion does not rebuild the material");
   assert.deepEqual(periodicDrift.afterDiagnostics, periodicDrift.diagnostics, "source motion does not upload unchanged drawing pixels");
-  await page.locator("#drawingBrush").selectOption("wisp");
+  console.log("Browser smoke: Wisp");
+  await page.locator("#clearDrawing").click();
+  assert.equal(await page.locator("#undoDrawing").isDisabled(), true);
+  await page.locator("#drawingGeometry").selectOption("wisp");
   await page.locator("#drawingWispEnergy").fill("0.8");
+  await page.locator("#drawingWispControls details summary").click();
   await page.locator("#drawingWispMomentum").fill("0.42");
   await page.locator("#drawingWispTurbulence").fill("1.4");
   await page.locator("#drawingWispPersistence").fill("240");
   await page.locator("#drawingWispDensity").fill("8");
   await drawWisp(page, canvas);
-  const wispStyle = await page.evaluate(() => window.__KALEIDOSCOPE_TEST_HOOKS__.drawingSource.findLatestDrawable()?.style);
+  await page.waitForFunction(() => !window.__KALEIDOSCOPE_TEST_HOOKS__.drawingSource.hasPaintSessions(), null, { timeout: 30000 });
+  assert.equal(await page.locator("#undoDrawing").isDisabled(), false, "asynchronous Wisp completion enables Undo");
+  await page.waitForFunction(() => JSON.parse(localStorage.getItem("kaleidoscope.workspace.v13") || "null")?.drawing?.content?.operations?.some(operation => operation.geometry?.type === "wisp"));
+  const wispStyle = await page.evaluate(() => window.__KALEIDOSCOPE_TEST_HOOKS__.drawingSource.findLatestDrawable(() => true)?.drawable?.material?.options);
   assert.equal(wispStyle?.brush, "wisp", "a browser Wisp gesture commits through the fixed-rate controller path");
   assert.deepEqual({ version: wispStyle?.version, energy: wispStyle?.energy, momentum: wispStyle?.momentum, turbulence: wispStyle?.turbulence, persistence: wispStyle?.persistence, density: wispStyle?.density }, { version: 2, energy: .8, momentum: .42, turbulence: 1.4, persistence: 240, density: 8 }, "the Wisp UI commits every artist control into the durable recipe");
   assert.ok(Number.isFinite(wispStyle?.wispUnitsPerPixel) && wispStyle.wispUnitsPerPixel > 0, "the browser Wisp stroke persists its frozen logical-pixel scale");
   await page.locator("#drawingTool").selectOption("arc");
   assert.equal(await page.locator("#drawingTool").inputValue(), "freehand", "Wisp tool coercion is reflected in the UI");
+  await page.locator("summary").filter({ hasText: /^Generator$/ }).click();
   await page.locator("#drawingGenerator").selectOption("spirograph");
   const generatorBrush = await page.evaluate(() => {
     const hooks = window.__KALEIDOSCOPE_TEST_HOOKS__;
-    return { control: document.querySelector("#drawingBrush").value, controller: hooks.drawingController.settings.brush, preview: hooks.drawingSource.preview?.style?.brush };
+    return { control: document.querySelector("#drawingMaterial").value, controller: hooks.drawingController.settings.material, preview: hooks.drawingSource.preview?.material?.type };
   });
-  assert.deepEqual(generatorBrush, { control: "pen", controller: "pen", preview: "pen" }, "generated paths cannot reinterpret Wisp time samples as spatial samples");
+  assert.deepEqual(generatorBrush, { control: "ink", controller: "ink", preview: "ink" }, "generated paths cannot reinterpret Wisp time samples as spatial samples");
+  console.log("Browser smoke: workspace reload");
+  await page.locator("#commitGenerator").click();
+  const expectedWorkspace = await page.evaluate(() => ({
+    content: JSON.parse(JSON.stringify(window.__KALEIDOSCOPE_TEST_HOOKS__.drawingSource.getContentState())),
+    settings: window.__KALEIDOSCOPE_TEST_HOOKS__.drawingController.getState()
+  }));
+  await page.waitForFunction(content => {
+    const saved = JSON.parse(localStorage.getItem("kaleidoscope.workspace.v13") || "null");
+    return JSON.stringify(saved?.drawing?.content) === content;
+  }, JSON.stringify(expectedWorkspace.content));
+  await page.reload({ waitUntil: "networkidle" });
+  const restoredWorkspace = await page.evaluate(() => ({
+    content: JSON.parse(JSON.stringify(window.__KALEIDOSCOPE_TEST_HOOKS__.drawingSource.getContentState())),
+    settings: window.__KALEIDOSCOPE_TEST_HOOKS__.drawingController.getState(),
+    canUndo: window.__KALEIDOSCOPE_TEST_HOOKS__.drawingSource.canUndo()
+  }));
+  assert.deepEqual(restoredWorkspace.content, expectedWorkspace.content, "workspace reload preserves ordered paint and generator recipes");
+  assert.deepEqual(restoredWorkspace.settings, expectedWorkspace.settings);
+  assert.equal(restoredWorkspace.canUndo, false);
+  console.log("Browser smoke: Ink/Silk live pixels, commit, reconstruction, and persistence");
+  const materialChecks = await page.evaluate(async () => {
+    const { DrawingSource } = await import("./drawing-source.js");
+    const results = [];
+    for (const [type, background] of [["ink", "#000000"], ["silk", "#000000"], ["silk", "#241821"]]) {
+      const source = new DrawingSource({ width: 1024, height: 1024 });
+      source.setBackgroundColor(background);
+      const points = [{ x: 40, y: 60 }, { x: 63, y: 65 }, { x: 80, y: 40 }, { x: 105, y: 75 }];
+      const recipe = count => ({ kind: "pathStroke", gesture: { points: points.slice(0, count), seed: 17 }, geometry: { type: "freehand" }, material: { type, color: "#88ddff", width: 5, opacity: .45, strands: 3, seed: 17 } });
+      const pixels = () => source.getFrame().pixels.getContext("2d").getImageData(0, 0, 256, 256).data;
+      let replays = 0;
+      const paint = source.paintOperation;
+      source.paintOperation = (...args) => { replays += 1; return paint(...args); };
+      const blank = pixels();
+      const id = source.beginPaintSession(recipe(1));
+      for (let count = 2; count <= points.length; count += 1) source.updatePaintSession(id, recipe(count));
+      const visibleDuringGesture = pixels().some((value, index) => index % 4 !== 3 && value !== blank[index]);
+      const before = pixels();
+      source.finishPaintSession(id);
+      for (let count = 0; count < 120 && source.hasPaintSessions(); count += 1) await new Promise(requestAnimationFrame);
+      const committed = pixels(), completionReplays = replays;
+      const saved = source.getContentState();
+      const restored = source.restoreContentState(saved), rebuilt = pixels();
+      let maxDifference = 0, differenceSum = 0, commitDifference = 0;
+      for (let index = 0; index < committed.length; index += 1) {
+        const difference = Math.abs(committed[index] - rebuilt[index]);
+        maxDifference = Math.max(maxDifference, difference); differenceSum += difference;
+        commitDifference = Math.max(commitDifference, Math.abs(committed[index] - before[index]));
+      }
+      results.push({ type, background, visibleDuringGesture, completionReplays, operationCount: source.operationCount, finished: !source.hasPaintSessions(), restored, maxDifference, averageDifference: differenceSum / committed.length, commitDifference, undoAfterRestore: source.canUndo() });
+    }
+    return results;
+  });
+  console.log("Material pixel checks:", JSON.stringify(materialChecks));
+  for (const check of materialChecks) {
+    assert.equal(check.visibleDuringGesture, true, `${check.type} deposits during the gesture`);
+    assert.equal(check.completionReplays, 0, `${check.type} completion promotes visible pixels`);
+    assert.equal(check.operationCount, 1);
+    assert.equal(check.finished, true);
+    assert.equal(check.restored, true);
+    assert.equal(check.undoAfterRestore, false);
+    // Flushing live Canvas batches and rebuilding tiles can rasterize edge
+    // coverage and premultiplied alpha slightly differently. Limit both the
+    // worst edge and total error.
+    assert.ok(check.maxDifference <= 16 && check.averageDifference < .03, `${check.type} reconstructs the visible pixels: ${JSON.stringify(check)}`);
+    if (check.type === "ink") assert.equal(check.commitDifference, 0, "Ink completion never changes deposited pixels");
+  }
   assert.deepEqual(errors, []);
 } finally {
   await browser?.close(); server.kill("SIGTERM");
@@ -178,6 +260,6 @@ async function drawingEnergy(page) {
     const pixels = context.getImageData(0, 0, drawingSource.width, drawingSource.height).data;
     let energy = 0;
     for (let index = 0; index < pixels.length; index += 64) energy += pixels[index] + pixels[index + 1] + pixels[index + 2];
-    return { energy, operationCount: drawingSource.operationCount, brushes: drawingSource.getContentState().operations.map(operation => operation.style?.brush) };
+    return { energy, operationCount: drawingSource.operationCount, brushes: drawingSource.getContentState().operations.map(operation => operation.material?.options?.brush) };
   });
 }

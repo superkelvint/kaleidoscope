@@ -62,7 +62,10 @@ const renderer = new Renderer(canvas, {
   // regardless of whether that frame came from a bitmap or DrawingSource.
   onPresent: () => { requestRecordingFrame(); updateFpsMeter(); }
 });
-const drawingSource = new DrawingSource({ onFrameChange: () => renderer.requestRender() });
+const drawingSource = new DrawingSource({
+  onFrameChange: () => renderer.requestRender(),
+  onDocumentChange: () => { refreshDrawingHistoryControls(); scheduleWorkspaceSave(); }
+});
 const drawingController = new DrawingController({ source: drawingSource, getRendererState: () => renderer.getCurrentMappingState() });
 
 const DRAWING_CURSOR_BY_BRUSH = {
@@ -155,7 +158,7 @@ function workspaceSnapshot() {
     state: renderer.getState(),
     // Paths remain continuous semantic geometry; the derived drawing material
     // is finite and repeats at presentation time.
-    drawing: { version: 2, settings: drawingController.getState(), content: drawingSource.getContentState() },
+    drawing: { version: 3, settings: drawingController.getState(), content: drawingSource.getContentState() },
     sourceMode,
     showMirrorGuides,
     reference: { visible: referenceState.visible, opacity: referenceState.opacity },
@@ -194,9 +197,7 @@ function restoreWorkspaceSettings() {
       if (Number.isFinite(opacity)) referenceState.opacity = Math.min(1, Math.max(0, opacity));
     }
     renderer.restoreState(saved.state);
-    // Workspace v1 and v2 both wrap the document state; the document itself
-    // validates/migrates its durable content version.
-    if (saved.drawing?.version === 1 || saved.drawing?.version === 2) { drawingController.restoreState(saved.drawing.settings); drawingSource.restoreContentState(saved.drawing.content); }
+    if ([1, 2, 3].includes(saved.drawing?.version)) { drawingController.restoreState(saved.drawing.settings); drawingSource.restoreContentState(saved.drawing.content); }
     if (saved.recordFps === 30 || saved.recordFps === 60) $("recordFps").value = String(saved.recordFps);
     if (saved.sourceMode === "drawing") {
       setSourceMode("drawing");
@@ -574,16 +575,17 @@ for (const eventName of ["pointerup", "pointercancel"]) referenceOverlay.addEven
 
 $("sourceImage").addEventListener("click", () => setSourceMode("bitmap"));
 $("sourceDrawing").addEventListener("click", () => setSourceMode("drawing"));
-const GENERATOR_COMPATIBLE_BRUSHES = new Set(["pen", "ribbon", "calligraphy", "spray", "texture", "fiber", "hair"]);
 function generatorStyleSnapshot() {
-  if (!GENERATOR_COMPATIBLE_BRUSHES.has(drawingController.settings.brush)) {
-    drawingController.setBrush("pen");
-    $("drawingBrush").value = drawingController.settings.brush;
+  if (!["ink", "silk"].includes(drawingController.settings.material)) {
+    drawingController.setMaterial("ink");
+    $("drawingMaterial").value = drawingController.settings.material;
     $("drawingTool").value = drawingController.settings.tool;
     syncDrawingBrushControls();
     updateCanvasCursor();
   }
-  return drawingController.styleSnapshot();
+  const style = drawingController.styleSnapshot();
+  if (style.material === "ink" && style.colorMode === "gradient") return { type: "adapter", color: style.color, opacity: style.opacity, width: style.size, options: { ...style, brush: "pen" } };
+  return { type: style.material, color: style.color, opacity: style.opacity, width: style.size, seed: style.seed, strands: style.silkStrands, spread: style.silkSpread, wander: style.silkWander, glow: style.silkGlow, options: { ...style, brush: "pen" } };
 }
 function makeSpirographDraft() {
   const generator = GENERATORS.spirograph;
@@ -595,7 +597,7 @@ function makeSpirographDraft() {
     animation: { amount: .5, speed: .15, phase: 0 },
     domain: { start: 0, end: generator.period() },
     sampling: { mode: "parameter", step: .01 },
-    style: generatorStyleSnapshot()
+    material: generatorStyleSnapshot()
   };
 }
 function makeGuillocheRosetteDraft() {
@@ -605,7 +607,7 @@ function makeGuillocheRosetteDraft() {
     config: structuredClone(generator.defaults),
     animation: { amount: .5, speed: .15, targets: { phaseOffset: false, secondaryAmplitude: false, secondaryFrequency: false, rotation: false } },
     domain: { start: 0, end: generator.period() },
-    sampling: { mode: "parameter", step: .01 }, style: generatorStyleSnapshot()
+    sampling: { mode: "parameter", step: .01 }, material: generatorStyleSnapshot()
   };
 }
 function editedGenerator() { return generatorEditorId ? drawingSource.getDrawable(generatorEditorId) : null; }
@@ -657,7 +659,7 @@ function previewGeneratorDraft() {
 }
 function refreshGeneratorDraftStyle() {
   if (!generatorDraft) return;
-  generatorDraft.style = { ...generatorStyleSnapshot(), seed: generatorDraft.style.seed };
+  generatorDraft.material = { ...generatorStyleSnapshot(), seed: generatorDraft.material.seed };
   previewGeneratorDraft();
 }
 function resetGeneratorDraft() {
@@ -781,15 +783,20 @@ document.querySelectorAll("#spirographControls input[type='range'], #guillocheRo
 $("toggleGuillocheRosetteMotion").addEventListener("click", () => renderer.updateState({ playing: !renderer.getState().playing }, { preview: false }));
 $("commitGuillocheRosette").addEventListener("click", () => { if (!generatorDraft) { resetGeneratorDraft(); return; } const committedId = drawingSource.commitDrawable(generatorDraft); if (committedId) { generatorDraft = null; generatorEditorId = committedId; syncGeneratorControls(); refreshDrawingHistoryControls(); scheduleWorkspaceSave(); } });
 $("resetGuillocheRosette").addEventListener("click", resetGeneratorDraft);
-function syncDrawingBrushControls(name = drawingController.settings.brush) {
+function syncDrawingBrushControls(name = drawingController.settings.geometry) {
+  const material = drawingController.settings.material;
+  $("drawingGeometry").value = name;
+  $("drawingMaterial").value = material;
+  for (const option of $("drawingMaterial").options) option.disabled = name !== "freehand" && option.value !== "ink";
   $("drawingRibbonControls").hidden = name !== "ribbon";
   $("drawingCalligraphyControls").hidden = name !== "calligraphy";
-  $("drawingSprayControls").hidden = name !== "spray";
-  $("drawingTextureControls").hidden = name !== "texture";
+  $("drawingSprayControls").hidden = material !== "spray";
+  $("drawingTextureControls").hidden = material !== "texture";
   $("drawingFiberControls").hidden = name !== "fiber" && name !== "hair";
   $("drawingWispControls").hidden = name !== "wisp";
+  $("drawingSilkControls").hidden = material !== "silk";
   syncDrawingColorControls(drawingController.settings.colorMode);
-  if (name === "texture") {
+  if (material === "texture") {
     loadCurrentTexture();
   }
 }
@@ -799,7 +806,8 @@ function syncDrawingColorControls(mode = drawingController.settings.colorMode) {
 }
 function syncDrawingControls() {
   $("drawingTool").value = drawingController.settings.tool;
-  $("drawingBrush").value = drawingController.settings.brush;
+  $("drawingGeometry").value = drawingController.settings.geometry;
+  $("drawingMaterial").value = drawingController.settings.material;
   $("drawingBackgroundColor").value = drawingSource.backgroundColor;
   $("drawingColorMode").value = drawingController.settings.colorMode;
   $("drawingColor").value = drawingController.settings.color;
@@ -847,11 +855,11 @@ function syncWispControls() {
 function refreshDrawingHistoryControls() {
   $("undoDrawing").disabled = !drawingSource.canUndo();
 }
-$("drawingBrush").addEventListener("change", event => {
-  drawingController.setBrush(event.target.value);
+$("drawingGeometry").addEventListener("change", event => {
+  drawingController.setGeometry(event.target.value);
   // Pen begins at 8px, which reduces even a detailed PNG tip to a line. Give
   // Texture a useful first-use size without overriding an intentional size.
-  if (event.target.value === "texture" && drawingController.settings.size === 8) {
+  if (drawingController.settings.material === "texture" && drawingController.settings.size === 8) {
     drawingController.set("size", 64);
     $("drawingSize").value = "64";
   }
@@ -861,6 +869,12 @@ $("drawingBrush").addEventListener("change", event => {
   refreshGeneratorDraftStyle();
   drawDrawingGuides();
 });
+$("drawingMaterial").addEventListener("change", event => {
+  drawingController.setMaterial(event.target.value);
+  if (event.target.value === "texture" && drawingController.settings.size === 8) { drawingController.set("size", 64); $("drawingSize").value = "64"; }
+  syncDrawingBrushControls(); updateCanvasCursor(); refreshGeneratorDraftStyle(); drawDrawingGuides();
+});
+for (const [id, key] of [["drawingSilkStrands", "silkStrands"], ["drawingSilkSpread", "silkSpread"], ["drawingSilkWander", "silkWander"], ["drawingSilkGlow", "silkGlow"]]) $(id).addEventListener("input", event => { drawingController.set(key, event.target.value); refreshGeneratorDraftStyle(); });
 $("drawingTool").addEventListener("change", event => { drawingController.setTool(event.target.value); event.target.value = drawingController.settings.tool; updateCanvasCursor(); drawDrawingGuides(); });
 $("drawingSmoothing").addEventListener("input", event => {
   const percent = Number(event.target.value);

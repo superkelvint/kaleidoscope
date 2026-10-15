@@ -39,13 +39,13 @@ test("Fiber emits backend-neutral polyline material instructions", () => {
   assert.ok(instructions.some(instruction => instruction.composite === "lighter"), "hot cores retain additive compositing");
 });
 
-test("Fiber materialVersion 1 preserves simulated paths and widths", () => {
+test("Fiber adapter material is independent of the removed materialVersion switch", () => {
   const legacy = [], shared = [];
   const v2 = { ...style, version: 2, fibers: .4, gravity: 20, branching: 0, curl: 0 };
   renderFiberPath(new BrushPainter(item => legacy.push(item)), path, v2);
   renderFiberPath(new BrushPainter(item => shared.push(item)), path, { ...v2, materialVersion: 1 });
   assert.deepEqual(shared.map(({ points, width, cap, composite }) => ({ points, width, cap, composite })), legacy.map(({ points, width, cap, composite }) => ({ points, width, cap, composite })));
-  assert.notDeepEqual(shared.map(item => item.color), legacy.map(item => item.color));
+  assert.deepEqual(shared, legacy);
 });
 
 test("Fiber solid mode honors the selected solid color over retained gradient swatches", () => {
@@ -53,6 +53,7 @@ test("Fiber solid mode honors the selected solid color over retained gradient sw
   renderFiberPath(context, path, { ...style, colorMode: "solid", color: "#ff0000", startColor: "#ffffff", endColor: "#0044ff" });
   assert.ok(context.strokes.length);
   for (const stroke of context.strokes) {
+    if (stroke.color === "#ff0000") continue;
     const [red, green, blue] = stroke.color.match(/\d+/g).map(Number);
     assert.ok(red >= green && red >= blue, `expected selected red, got ${stroke.color}`);
   }
@@ -110,14 +111,23 @@ test("Fiber taper chunks use butt caps so shared endpoints do not accumulate alp
   assert.ok(context.strokes.every(stroke => stroke.lineCap === "butt"));
 });
 
-test("Fiber v2 gradient progress is measured across the whole gesture, not each taper chunk", () => {
+test("Fiber v2 material combines progress and energy across taper chunks", () => {
   const context = new Context();
   renderFiberPath(context, Array.from({ length: 141 }, (_, index) => ({ x: index * 5, y: 100 })), {
     ...style, version: 2, assistLevel: 0, fibers: 2, branching: 1, curl: 0, gravity: 0,
     colorMode: "gradient", startColor: "#000000", endColor: "#ffffff"
   });
   const shades = context.strokes.map(stroke => Number(stroke.color.match(/\d+/)?.[0]));
-  assert.ok(Math.min(...shades) < 20, `expected an early start-colour chunk, got ${Math.min(...shades)}`);
-  assert.ok(Math.max(...shades) > 220, `expected an end-colour chunk, got ${Math.max(...shades)}`);
+  assert.ok(Math.min(...shades) < 100, `expected a darker early chunk, got ${Math.min(...shades)}`);
+  assert.ok(Math.max(...shades) > 180, `expected a lighter late chunk, got ${Math.max(...shades)}`);
+  assert.ok(Math.max(...shades) - Math.min(...shades) > 100, "the gradient retains a broad longitudinal range");
   assert.ok(shades.filter(shade => shade < 180).length >= Math.floor(shades.length * .2), "gradient should not be overwhelmingly end colour");
+});
+
+test("migrated v3 Fiber retains its original material-version choice without changing geometry", () => {
+  const legacy = [], shared = [], recipe = { ...style, version: 2, fibers: .4, gravity: 20, branching: 0, curl: 0, schemaVersion: 3 };
+  renderFiberPath(new BrushPainter(item => legacy.push(item)), path, recipe);
+  renderFiberPath(new BrushPainter(item => shared.push(item)), path, { ...recipe, materialVersion: 1 });
+  assert.deepEqual(legacy.map(({ points, width }) => ({ points, width })), shared.map(({ points, width }) => ({ points, width })));
+  assert.notDeepEqual(legacy.map(item => item.color), shared.map(item => item.color));
 });

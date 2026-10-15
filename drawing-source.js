@@ -1,9 +1,11 @@
-import { BRUSHES, brushFootprint, brushTextureId, canReplayBrushPath, createLiveBrushPreview, createPaintSessionRenderer, measureBrushReplay, needsStaticBrushCheckpoint, renderBrushReplay, replayBrushContours } from "./brushes.js";
+import { brushFootprint, brushTextureId, createLiveBrushPreview, createPaintSessionRenderer, measureBrushReplay, needsStaticBrushCheckpoint, renderBrushReplay, replayBrushContours } from "./brushes.js";
 import { brushTextureCatalog } from "./brush-textures.js";
 import { paintBrushInstructions } from "./brush-painter.js";
 import { derivePath, drawableDependsOnTime, isDrawable } from "./drawable-path.js";
 import { count, measure } from "./perf.js";
 import { DrawingDocument } from "./drawing-document.js";
+import { deriveStrokeGeometry } from "./stroke-geometry.js";
+import { createMaterialSession, measureMaterialBounds, renderMaterial } from "./stroke-material.js";
 
 const TILE_SIZE = 1024;
 const ANTIALIAS_PADDING = 2;
@@ -18,18 +20,29 @@ function floorTile(value) { return Math.floor(value / TILE_SIZE); }
 // The document persists explicit operation records. The rasterizer keeps a
 // transient drawable projection so the geometry/brush seam stays unchanged.
 function drawableForOperation(operation) {
-  if (operation?.type === "PaintOperation") return { kind: "pathStroke", points: operation.points, style: operation.style };
+  if (operation?.type === "PaintOperation") return { kind: "pathStroke", gesture: operation.gesture, geometry: operation.geometry, material: operation.material };
   if (operation?.type === "GeneratorOperation") {
-    const { generator, generatorVersion, config, animation, domain, sampling, style } = operation;
-    return { kind: "generatedStroke", generator, generatorVersion, config, animation, domain, sampling, style };
+    const { generator, generatorVersion, config, animation, domain, sampling, material } = operation;
+    return { kind: "generatedStroke", generator, generatorVersion, config, animation, domain, sampling, geometry: { type: "generator" }, material };
   }
   return operation?.drawable || null;
 }
 function rasterOperation(operation) { return { ...structuredClone(operation), drawable: drawableForOperation(operation) }; }
 function isPaintSessionDrawable(drawable) {
-  return drawable?.kind === "pathStroke" && Boolean(BRUSHES[drawable?.style?.brush])
-    && Array.isArray(drawable.points)
-    && drawable.points.every(point => Number.isFinite(point?.x) && Number.isFinite(point?.y));
+  return drawable?.kind === "pathStroke" && Array.isArray(drawable.gesture?.points)
+    && drawable.gesture.points.every(point => Number.isFinite(point?.x) && Number.isFinite(point?.y));
+}
+function legacyStyle(drawable) {
+  const geometry = drawable?.geometry || {}, material = drawable?.material || {};
+  const brush = geometry.type === "freehand" ? "pen" : geometry.type;
+  return { brush, color: material.color, opacity: material.opacity, size: material.width, seed: drawable?.gesture?.seed ?? material.seed, ...geometry.options, ...material.options };
+}
+function isSharedMaterial(drawable) { return ["ink", "silk"].includes(drawable?.material?.type) && (drawable?.kind === "generatedStroke" || drawable?.geometry?.type === "freehand"); }
+function drawablePoints(drawable) { return drawable?.gesture?.points || []; }
+function strokeGeometryFor(drawable, { width, height, time = 0 } = {}) {
+  if (drawable?.kind === "pathStroke") return deriveStrokeGeometry(drawable.geometry, { gesture: drawable.gesture });
+  const path = derivePath(drawable, { width, height, time });
+  return { paths: path.contours.map(contour => deriveStrokeGeometry({ type: "generator", closed: contour.closed }, { points: contour.points }).paths[0]), instances: path.instances || [{ x: 0, y: 0 }] };
 }
 function boundsForPath(path, style) {
   let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
@@ -115,12 +128,12 @@ export class DrawingRasterizer {
 
   getWorldScale() { return { width: this.width, height: this.height }; }
   getFrame() { return { pixels: this.canvas, width: this.canvas.width, height: this.canvas.height, revision: this.revision, world: { origin: { x: this.materialBounds.left, y: this.materialBounds.top }, extent: { width: this.materialBounds.width, height: this.materialBounds.height }, scale: { width: this.width, height: this.height }, wrap: "repeat" } }; }
-  isDrawable(drawable) { return isDrawable(drawable) && Boolean(BRUSHES[drawable?.style?.brush]) && (drawable.kind !== "pathStroke" || canReplayBrushPath(drawable.points, drawable.style)); }
+  isDrawable(drawable) { return isDrawable(drawable) && (drawable.kind !== "pathStroke" || drawablePoints(drawable).length > 0); }
   markFrameChanged() { this.revision += 1; this.onFrameChange(); }
   perfMetadata(extra = {}) {
     return {
       committedOperationCount: this.operations.length,
-      activePreviewPointCount: this.preview?.points?.length || 0,
+      activePreviewPointCount: drawablePoints(this.preview).length,
       materialBounds: { ...this.materialBounds },
       materialPixels: { width: this.canvas.width, height: this.canvas.height },
       requestedPixelDensity: this.requestedPixelDensity,
@@ -142,10 +155,10 @@ export class DrawingRasterizer {
   }
   advanceLivePreview(drawable) {
     let session = this.livePreview?.session;
-    if (session && !session.acceptsStyle(drawable.style)) this.disposeLivePreview();
+    if (session && !session.acceptsStyle(legacyStyle(drawable))) this.disposeLivePreview();
     session = this.livePreview?.session;
     if (!session) {
-      session = createLiveBrushPreview(drawable);
+      session = createLiveBrushPreview({ ...drawable, points: drawablePoints(drawable), style: legacyStyle(drawable) });
       if (!session) return false;
       if (this.committedDirty) this.composeCommittedMaterial();
       const canvas = createPaintCanvas(this.canvas.width, this.canvas.height), context = canvas.getContext("2d");
@@ -153,8 +166,8 @@ export class DrawingRasterizer {
       this.livePreview = { canvas, context, session };
     }
     const consumedBefore = session.consumedSampleCount;
-    if (drawable.points.length < consumedBefore) return false;
-    const advanced = measure("Drawing live brush preview simulation", () => session.advance(drawable.points.slice(consumedBefore)), () => this.perfMetadata({ newSampleCount: session.consumedSampleCount - consumedBefore, activeParticleCount: session.activeParticleCount }));
+    if (drawablePoints(drawable).length < consumedBefore) return false;
+    const advanced = measure("Drawing live brush preview simulation", () => session.advance(drawablePoints(drawable).slice(consumedBefore)), () => this.perfMetadata({ newSampleCount: session.consumedSampleCount - consumedBefore, activeParticleCount: session.activeParticleCount }));
     if (!advanced) return false;
     const bounds = session.deltaBounds();
     if (!bounds) { session.finishDelta?.(); return false; }
@@ -202,10 +215,21 @@ export class DrawingRasterizer {
     // Completed operations are now represented by the reconstructed committed
     // material. Only active/finishing sessions are redrawn into the overlay.
     for (const session of this.paintSessions.values()) {
-      if (!session.drawable?.points?.length) continue;
-      session.renderer = createPaintSessionRenderer({ ...session.drawable, points: [] });
-      const batches = session.renderer?.advance(session.drawable) || [];
-      session.consumed = session.drawable.points.length;
+      if (!drawablePoints(session.drawable).length) continue;
+      const shared = isSharedMaterial(session.drawable);
+      const input = shared ? session.drawable : { ...session.drawable, points: drawablePoints(session.drawable), style: legacyStyle(session.drawable) };
+      let batches;
+      if (session.rebuildRenderer) {
+        session.renderer?.dispose?.();
+        session.renderer = shared ? createMaterialSession(session.drawable) : createPaintSessionRenderer({ ...input, points: [] });
+        batches = session.renderer?.advance(input) || [];
+        session.rebuildRenderer = false;
+      } else {
+        // Reuse visible simulation progress, including a partially consumed
+        // release tail. Material loss must not restart or finish the tail.
+        batches = session.renderer?.reconstruct(input) || [];
+      }
+      session.consumed = drawablePoints(session.drawable).length;
       this.paintSessionInstructions(batches);
     }
   }
@@ -233,7 +257,7 @@ export class DrawingRasterizer {
     else this.appendStaticOperationToCachedTiles(operation);
     this.staticPrefixEnd = this.operations.findIndex(op => drawableDependsOnTime(op.drawable));
     if (this.staticPrefixEnd < 0) this.staticPrefixEnd = this.operations.length;
-    if (needsStaticBrushCheckpoint(operation.drawable?.style)) this.staticCheckpoints.push({ index: this.operations.length, canvas: this.baseStaticCanvas });
+    if (needsStaticBrushCheckpoint(legacyStyle(operation.drawable))) this.staticCheckpoints.push({ index: this.operations.length, canvas: this.baseStaticCanvas });
     if (!timeDependent && this.appendStaticOperationToCommittedView(operation)) {
       this.rerender();
     } else {
@@ -265,15 +289,18 @@ export class DrawingRasterizer {
     const drawable = operation?.drawable;
     if (!drawable) return null;
     const prepared = this.prepareOperation(operation);
-    return prepared.dynamic ? boundsForPath(derivePath(drawable, { width: this.width, height: this.height, time: this.time }), drawable.style) : prepared.bounds;
+    if (!prepared.dynamic) return prepared.bounds;
+    if (isSharedMaterial(drawable)) return measureMaterialBounds(strokeGeometryFor(drawable, { width: this.width, height: this.height, time: this.time }), drawable.material, { seed: drawable.gesture?.seed ?? drawable.material.seed });
+    return boundsForPath(derivePath(drawable, { width: this.width, height: this.height, time: this.time }), legacyStyle(drawable));
   }
   prepareOperation(operation) {
     const id = operation?.id;
     const dynamic = drawableDependsOnTime(operation?.drawable);
     if (!dynamic && id && this.preparedDrawables.has(id)) return this.preparedDrawables.get(id);
-    const brushMeasurement = dynamic ? null : measureBrushReplay(operation.drawable);
+    const brushMeasurement = dynamic || isSharedMaterial(operation.drawable) ? null : measureBrushReplay({ ...operation.drawable, points: drawablePoints(operation.drawable), style: legacyStyle(operation.drawable) });
     const path = dynamic || brushMeasurement ? null : derivePath(operation.drawable, { width: this.width, height: this.height, time: this.time });
-    const prepared = { dynamic, brushMeasurement, path, bounds: brushMeasurement ? brushMeasurement.bounds && { left: Math.floor(brushMeasurement.bounds.left - ANTIALIAS_PADDING), top: Math.floor(brushMeasurement.bounds.top - ANTIALIAS_PADDING), right: Math.ceil(brushMeasurement.bounds.right + ANTIALIAS_PADDING), bottom: Math.ceil(brushMeasurement.bounds.bottom + ANTIALIAS_PADDING) } : path ? boundsForPath(path, operation.drawable.style) : null };
+    const sharedGeometry = isSharedMaterial(operation.drawable) ? strokeGeometryFor(operation.drawable, { width: this.width, height: this.height, time: this.time }) : null;
+    const prepared = { dynamic, brushMeasurement, path, sharedGeometry, bounds: brushMeasurement ? brushMeasurement.bounds && { left: Math.floor(brushMeasurement.bounds.left - ANTIALIAS_PADDING), top: Math.floor(brushMeasurement.bounds.top - ANTIALIAS_PADDING), right: Math.ceil(brushMeasurement.bounds.right + ANTIALIAS_PADDING), bottom: Math.ceil(brushMeasurement.bounds.bottom + ANTIALIAS_PADDING) } : sharedGeometry ? measureMaterialBounds(sharedGeometry, operation.drawable.material, { seed: operation.drawable.gesture?.seed ?? operation.drawable.material.seed }) : path ? boundsForPath(path, legacyStyle(operation.drawable)) : null };
     if (!dynamic && id) this.preparedDrawables.set(id, prepared);
     return prepared;
   }
@@ -295,7 +322,7 @@ export class DrawingRasterizer {
     return measure("Drawing tile rebuild", () => {
       tile.ctx.clearRect(0, 0, TILE_SIZE, TILE_SIZE);
       for (const operation of this.renderIndex.forTile(x, y)) {
-        count("Drawing tile history operation replay", () => this.perfMetadata({ tile: { x, y }, brush: operation.drawable?.style?.brush }));
+        count("Drawing tile history operation replay", () => this.perfMetadata({ tile: { x, y }, brush: legacyStyle(operation.drawable).brush }));
         this.paintCachedOperation(operation, tile.ctx, { x: x * TILE_SIZE, y: y * TILE_SIZE, width: TILE_SIZE, height: TILE_SIZE });
       }
       tile.generation = this.committedRasterGeneration;
@@ -336,7 +363,9 @@ export class DrawingRasterizer {
     // magnification, replay the durable paths into the material at its
     // actual pixel density instead; the regular tile cache remains the fast
     // path when it is sampled at native resolution or smaller.
-    if (sx > 1.001 || sy > 1.001) {
+    // A transparent tile cannot encode additive blending against a colored
+    // backdrop. Reconstruct directly in document order in that case.
+    if (sx > 1.001 || sy > 1.001 || this.backgroundColor !== "#000000") {
       for (let index = 0; index < this.operations.length; index += 1) {
         const operation = this.operations[index];
         if (operation?.drawable) this.paintOperation(operation, context, { periodic: true, transform: { x: -this.materialBounds.left, y: -this.materialBounds.top, sx, sy } });
@@ -367,9 +396,9 @@ export class DrawingRasterizer {
   beginPaintSession(drawable) {
     // A transient renderer decides whether its current input prefix is visible.
     if (!isPaintSessionDrawable(drawable)) return null;
-    const textureId = brushTextureId(drawable.style);
+    const textureId = brushTextureId(legacyStyle(drawable));
     if (textureId && !brushTextureCatalog.get(textureId)) this.requestTextureReplay(textureId);
-    const renderer = createPaintSessionRenderer(drawable);
+    const renderer = isSharedMaterial(drawable) ? createMaterialSession(drawable) : createPaintSessionRenderer({ ...drawable, points: drawablePoints(drawable), style: legacyStyle(drawable) });
     const id = `paint-session-${globalThis.crypto?.randomUUID?.() || Math.random()}`;
     this.paintSessions.set(id, { drawable: structuredClone(drawable), renderer, consumed: 0, finishing: false });
     this.advancePaintSession(id, drawable);
@@ -404,17 +433,18 @@ export class DrawingRasterizer {
   advancePaintSession(id, drawable) {
     const session = this.paintSessions.get(id);
     if (!session || !isPaintSessionDrawable(drawable)) return false;
-    if (!session.renderer?.acceptsStyle(drawable.style)) return false;
-    if (drawable.points.length <= session.consumed && hasChangedPaintGeometry(session.drawable.points, drawable.points, session.consumed)) {
+    if (!session.renderer?.acceptsStyle(isSharedMaterial(drawable) ? drawable : legacyStyle(drawable))) return false;
+    if (drawablePoints(drawable).length <= session.consumed && hasChangedPaintGeometry(drawablePoints(session.drawable), drawablePoints(drawable), session.consumed)) {
       // The active path was compacted in-place rather than extended. Its
       // previous incremental renderer cannot consume those replacement
       // samples, so rebuild the transient overlay from its current path.
-      session.drawable = structuredClone(drawable);
+      session.drawable = structuredClone(drawable); session.rebuildRenderer = true;
       this.reconcileImmediateRaster(); this.rerender(); return true;
     }
     session.drawable = structuredClone(drawable);
-    this.paintSessionInstructions(session.renderer.advance(drawable, session.consumed));
-    session.consumed = drawable.points.length;
+    const rendererDrawable = isSharedMaterial(drawable) ? drawable : { ...drawable, points: drawablePoints(drawable), style: legacyStyle(drawable) };
+    this.paintSessionInstructions(session.renderer.advance(rendererDrawable, session.consumed));
+    session.consumed = drawablePoints(drawable).length;
     this.rerender(); return true;
   }
   schedulePaintFinish(id) {
@@ -477,10 +507,22 @@ export class DrawingRasterizer {
     this.paintOperation(operation, context, { tile, periodic: true });
   }
   paintDrawable(drawable, context = this.ctx, { preview = false, tile = null, transform = null, prepared = null, periodic = false } = {}) {
-    const brushMeasurement = prepared?.brushMeasurement || measureBrushReplay(drawable, { tail: !preview });
-    const path = brushMeasurement ? null : (prepared?.path || derivePath(drawable, { width: this.width, height: this.height, time: this.time })); if (!brushMeasurement && !path.contours.length) return;
+    if (isSharedMaterial(drawable)) {
+      const sourcePath = prepared?.sharedGeometry || strokeGeometryFor(drawable, { width: this.width, height: this.height, time: this.time });
+      const bounds = prepared?.bounds || measureMaterialBounds(sourcePath, drawable.material, { seed: drawable.gesture?.seed ?? drawable.material.seed });
+      if (!bounds) return;
+      context.save();
+      if (tile) { context.beginPath?.(); context.rect?.(0, 0, tile.width, tile.height); context.clip?.(); context.translate(-tile.x, -tile.y); }
+      if (transform) { context.translate(transform.x * transform.sx, transform.y * transform.sy); context.scale?.(transform.sx, transform.sy); }
+      const target = tile ? { left: tile.x, top: tile.y, width: tile.width, height: tile.height } : this.materialBounds;
+      for (const translation of periodic ? periodicTranslations(bounds, this.materialBounds, target) : [{ x: 0, y: 0 }]) { context.save(); context.translate(translation.x, translation.y); renderMaterial(context, sourcePath, drawable.material, { seed: drawable.gesture?.seed ?? drawable.material.seed }); context.restore(); }
+      context.restore(); return;
+    }
+    const style = legacyStyle(drawable), legacyDrawable = drawable.kind === "pathStroke" ? { ...drawable, points: drawablePoints(drawable), style } : { ...drawable, style };
+    const brushMeasurement = prepared?.brushMeasurement || measureBrushReplay(legacyDrawable, { tail: !preview });
+    const path = brushMeasurement ? null : (prepared?.path || derivePath(legacyDrawable, { width: this.width, height: this.height, time: this.time })); if (!brushMeasurement && !path.contours.length) return;
     count("Drawing brush rasterization", () => this.perfMetadata({ preview, tile: tile ? { x: tile.x, y: tile.y } : null }));
-    const textureId = brushTextureId(drawable.style);
+    const textureId = brushTextureId(style);
     if (textureId && !brushTextureCatalog.get(textureId)) { this.requestTextureReplay(textureId); return; }
     context.save();
     if (tile) { context.beginPath?.(); context.rect?.(0, 0, tile.width, tile.height); context.clip?.(); context.translate(-tile.x, -tile.y); }
@@ -489,13 +531,13 @@ export class DrawingRasterizer {
       ? { left: tile.x, top: tile.y, width: tile.width, height: tile.height }
       : this.materialBounds;
     const replay = brushMeasurement;
-    const bounds = replay ? replay.bounds && { left: replay.bounds.left - ANTIALIAS_PADDING, top: replay.bounds.top - ANTIALIAS_PADDING, right: replay.bounds.right + ANTIALIAS_PADDING, bottom: replay.bounds.bottom + ANTIALIAS_PADDING } : boundsForPath(path, drawable.style);
+    const bounds = replay ? replay.bounds && { left: replay.bounds.left - ANTIALIAS_PADDING, top: replay.bounds.top - ANTIALIAS_PADDING, right: replay.bounds.right + ANTIALIAS_PADDING, bottom: replay.bounds.bottom + ANTIALIAS_PADDING } : boundsForPath(path, style);
     const translations = periodic
       ? periodicTranslations(bounds, this.materialBounds, target)
       : [{ x: 0, y: 0 }];
     for (const translation of translations) {
-      if (replay) { context.save(); context.translate(translation.x, translation.y); renderBrushReplay(context, drawable, { tail: !preview }); context.restore(); }
-      else this.replayContours(context, path.contours, drawable.style, translation, preview);
+      if (replay) { context.save(); context.translate(translation.x, translation.y); renderBrushReplay(context, legacyDrawable, { tail: !preview }); context.restore(); }
+      else this.replayContours(context, path.contours, style, translation, preview);
     }
     context.restore();
   }
@@ -505,8 +547,9 @@ export class DrawingRasterizer {
 
 /** Renderer-facing drawing source. Durable mutations are translated to ChangeSets. */
 export class DrawingSource {
-  constructor({ width = 2048, height = 2048, onFrameChange = () => {}, createId } = {}) {
+  constructor({ width = 2048, height = 2048, onFrameChange = () => {}, onDocumentChange = () => {}, createId } = {}) {
     this.document = new DrawingDocument({ createId });
+    this.onDocumentChange = onDocumentChange;
     this.rasterizer = new DrawingRasterizer({ width, height, onFrameChange });
   }
   get width() { return this.rasterizer.width; }
@@ -550,25 +593,25 @@ export class DrawingSource {
     let committedId = null;
     const started = this.rasterizer.finishPaintSession(id, (drawable, bounds) => {
       const change = this.document.commit(drawable); if (!change) return;
-      this.rasterizer.commitImmediatePaint(change.operation, bounds); committedId = change.id;
+      this.rasterizer.commitImmediatePaint(change.operation, bounds); committedId = change.id; this.onDocumentChange(change);
     });
     return started ? committedId || true : null;
   }
   getContentState() { return this.document.getContentState(); }
-  restoreContentState(state) { const change = this.document.restoreContentState(state); if (!change) return false; this.rasterizer.rebuildFrom(this.document.getRenderView()); return true; }
+  restoreContentState(state) { const change = this.document.restoreContentState(state); if (!change) return false; this.rasterizer.rebuildFrom(this.document.getRenderView()); this.onDocumentChange(change); return true; }
   canUndo() { return this.document.canUndo(); }
   getDrawable(id) { return this.document.getDrawable(id); }
   findLatestDrawable(predicate) { return this.document.findLatest(predicate); }
   commitDrawable(drawable) {
     if (drawable?.kind === "generatedStroke" && this.hasPaintSessions()) return null;
-    const change = this.document.commit(drawable); if (!change) return null; this.rasterizer.applyChange(change, this.document.getRenderView()); return change.id;
+    const change = this.document.commit(drawable); if (!change) return null; this.rasterizer.applyChange(change, this.document.getRenderView()); this.onDocumentChange(change); return change.id;
   }
   beginReplaceAction(id) { return this.document.beginReplaceAction(id); }
   endReplaceAction() { this.document.endReplaceAction(); }
-  replaceDrawable(id, drawable) { if (drawable?.kind === "generatedStroke" && this.hasPaintSessions()) return false; const change = this.document.replace(id, drawable); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); return true; }
-  setBackgroundColor(color) { const change = this.document.setBackgroundColor(color); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); return true; }
-  undo() { const change = this.document.undo(); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); return true; }
-  clear() { const change = this.document.clear(); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); return true; }
+  replaceDrawable(id, drawable) { if (drawable?.kind === "generatedStroke" && this.hasPaintSessions()) return false; const change = this.document.replace(id, drawable); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); this.onDocumentChange(change); return true; }
+  setBackgroundColor(color) { const change = this.document.setBackgroundColor(color); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); this.onDocumentChange(change); return true; }
+  undo() { const change = this.document.undo(); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); this.onDocumentChange(change); return true; }
+  clear() { const change = this.document.clear(); if (!change) return false; this.rasterizer.applyChange(change, this.document.getRenderView()); this.onDocumentChange(change); return true; }
   perfMetadata(extra) { return this.rasterizer.perfMetadata(extra); }
 }
 

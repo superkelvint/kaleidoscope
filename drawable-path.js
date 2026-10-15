@@ -3,11 +3,11 @@ import { measure } from "./perf.js";
 
 const MAX_SAMPLES_PER_CONTOUR = 2048;
 const MIN_PARAMETER_STEP = .002;
-function validStyle(style) { return Boolean(style && typeof style === "object" && typeof style.brush === "string"); }
+function validMaterial(material) { return Boolean(material && typeof material === "object" && typeof material.type === "string"); }
 function validPoint(point) { return Number.isFinite(point?.x) && Number.isFinite(point?.y) && (point.holdCount === undefined || (Number.isFinite(point.holdCount) && point.holdCount >= 0)); }
 
 function validGeneratedStroke(drawable) {
-  if (!GENERATORS[drawable?.generator] || drawable.generatorVersion !== GENERATORS[drawable.generator].version || !validStyle(drawable.style)) return false;
+  if (!GENERATORS[drawable?.generator] || drawable.generatorVersion !== GENERATORS[drawable.generator].version || !validMaterial(drawable.material)) return false;
   const validRecipe = drawable.generator === "spirograph"
     ? validSpirographConfig(drawable.config) && validSpirographAnimation(drawable.animation)
     : drawable.generator === "guillocheRosette"
@@ -61,7 +61,7 @@ function normalizedGuillocheRosetteContours(drawable, time) {
 }
 
 export function isDrawable(drawable) {
-  if (drawable?.kind === "pathStroke") return Array.isArray(drawable.points) && validStyle(drawable.style) && drawable.points.every(validPoint);
+  if (drawable?.kind === "pathStroke") return Array.isArray(drawable.gesture?.points) && validMaterial(drawable.material) && typeof drawable.geometry?.type === "string" && drawable.gesture.points.every(validPoint);
   if (drawable?.kind === "generatedStroke") return validGeneratedStroke(drawable);
   return false;
 }
@@ -74,7 +74,7 @@ export function drawableDependsOnTime(drawable) {
 
 export function derivePath(drawable, { width, height, time = 0 } = {}) {
   return measure("derivePath", () => {
-  if (drawable?.kind === "pathStroke") return { contours: [{ points: drawable.points, closed: false }], instances: [{ x: 0, y: 0 }] };
+  if (drawable?.kind === "pathStroke") return { contours: [{ points: drawable.gesture?.points || [], closed: false }], instances: [{ x: 0, y: 0 }] };
   if (!validGeneratedStroke(drawable) || !Number.isFinite(width) || !Number.isFinite(height)) return { contours: [] };
   // Geometry belongs to one canonical location in the continuous drawing
   // world; generated recipes have no placement.

@@ -87,8 +87,10 @@ function heldStampCount(point) {
   return Math.max(0, count);
 }
 
+function usesSharedMaterial(style) { return style.schemaVersion !== 3 || Number(style.materialVersion) === 1; }
+
 function materialOptions(style, { points = [], index = 0, progress = 0, energy, profile, closed = false, colorSteps = 0 } = {}) {
-  if (Number(style.materialVersion) !== 1) return { color: colorAtPathPosition(style, progress), opacity: style.opacity };
+  if (!usesSharedMaterial(style)) return { color: colorAtPathPosition(style, progress), opacity: style.opacity };
   const defaultProfile = style.brush === "texture" ? "texture" : ["pen", "ribbon", "spray"].includes(style.brush) ? "additive" : "pen";
   return resolveBrushMaterial(style, {
     energy: energy ?? contourEnergy(points, index, style.size, { closed }), progress,
@@ -139,7 +141,7 @@ export function createImmediateBrushSession(style = {}) {
     ...style,
     ...materialOptions(style, {
       progress: livePosition(), energy,
-      colorSteps: style.brush === "texture" && Number(style.materialVersion) === 1 ? TEXTURE_GRADIENT_STEPS : 0
+      colorSteps: style.brush === "texture" ? TEXTURE_GRADIENT_STEPS : 0
     }),
     tangent, random
   });
@@ -167,7 +169,7 @@ export function createImmediateBrushSession(style = {}) {
       if (!previous) { sprayStamp(target, point, options); sprayUntilStamp = spraySpacing(options); }
       else {
         const dx = point.x - previous.x, dy = point.y - previous.y, distance = Math.hypot(dx, dy);
-        const sharedMaterial = Number(style.materialVersion) === 1;
+        const sharedMaterial = usesSharedMaterial(style);
         if (!sharedMaterial) travelled += distance;
         if (distance > .0001) {
           const direction = { x: dx / distance, y: dy / distance };
@@ -381,10 +383,9 @@ export function canReplayBrushPath(points, style = {}) {
 }
 
 function hasNativePenStyle(options) {
-  // Material v1 Pen is additive even in solid mode. The legacy Canvas stroke
-  // shortcut cannot reproduce those instruction-level composite semantics,
-  // including generated contours replayed after restore.
-  return Number(options.materialVersion) !== 1 && options.brush === "pen" && options.taper !== "sine" && options.colorMode !== "gradient";
+  // Migrated v3 additive Pen must retain its historical deposition. New
+  // adapter contours can use the native solid centerline shortcut.
+  return !(options.schemaVersion === 3 && Number(options.materialVersion) === 1) && options.brush === "pen" && options.taper !== "sine" && options.colorMode !== "gradient";
 }
 
 function canUseCompoundPen(options) {
@@ -458,7 +459,7 @@ export function replayBrushPath(ctx, points, options, { closed = false } = {}) {
   // Versioned Spray/Texture must reconstruct the exact same chronological
   // input stream as immediate painting: each sample, then its consumed holds.
   // This preserves Spray's RNG sequence and Texture's segment-local material.
-  if (!closed && Number(options.materialVersion) === 1 && ["spray", "texture"].includes(options.brush)) {
+  if (!closed && usesSharedMaterial(options) && ["spray", "texture"].includes(options.brush)) {
     const replay = createImmediateBrushSession(options);
     if (replay) {
       for (const point of points) {
@@ -506,12 +507,10 @@ export function replayBrushPath(ctx, points, options, { closed = false } = {}) {
       const normalized = totalDistance ? position / totalDistance : 0;
       // Gradient texture strokes use at most 32 tint cache entries per tip.
       const quantized = Math.round(Math.min(1, Math.max(0, normalized)) * TEXTURE_GRADIENT_STEPS) / TEXTURE_GRADIENT_STEPS;
-      const progress = Number(options.materialVersion) === 1
-        ? Math.min(1, position / Math.max(Number(options.size) * 24, 1))
-        : quantized;
+      const progress = usesSharedMaterial(options) ? Math.min(1, position / Math.max(Number(options.size) * 24, 1)) : quantized;
       return { ...options, ...materialOptions(options, {
         points, index: Math.min(points.length - 1, Math.round(normalized * (points.length - 1))), progress,
-        profile: "texture", closed, colorSteps: Number(options.materialVersion) === 1 ? TEXTURE_GRADIENT_STEPS : 0
+        profile: "texture", closed, colorSteps: TEXTURE_GRADIENT_STEPS
       }), tangent };
     };
     let firstTangent = null;
@@ -575,9 +574,7 @@ export function replayBrushPath(ctx, points, options, { closed = false } = {}) {
     const t = points.length === 1 ? 0.5 : index / (points.length - 1);
     const tangent = index ? tangentBetween(points[index - 1], point, previousTangent, maxTangentDistance) : null;
     if (tangent) previousTangent = tangent;
-    const progress = Number(replayOptions.materialVersion) === 1
-      ? Math.min(1, materialTravelled / Math.max(Number(replayOptions.size) * 24, 1))
-      : (points.length === 1 ? 0 : t);
+    const progress = usesSharedMaterial(replayOptions) ? Math.min(1, materialTravelled / Math.max(Number(replayOptions.size) * 24, 1)) : (points.length === 1 ? 0 : t);
     const stampOptions = { ...replayOptions, ...materialOptions(replayOptions, { points, index, progress, closed }), tangent };
     if (replayOptions.brush === "pen") {
       // Geometric pen envelopes are based on normalized path position, never

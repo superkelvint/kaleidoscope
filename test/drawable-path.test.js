@@ -1,3 +1,4 @@
+import { drawingRecipe } from "./drawing-recipe.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { derivePath, drawableDependsOnTime, isDrawable } from "../drawable-path.js";
@@ -7,22 +8,22 @@ import { BrushPainter } from "../brush-painter.js";
 import { contourEnergy } from "../brush-material.js";
 
 function spirograph(overrides = {}) {
-  return {
+  return drawingRecipe({
     kind: "generatedStroke", generator: "spirograph", generatorVersion: 2,
     config: { lobes: 5, penOffset: 1.2, reach: .1, rotation: 0, phase: 0, arms: 3 },
     animation: { amount: .5, speed: .15, phase: 0 },
     domain: { start: 0, end: Math.PI * 2 }, sampling: { mode: "parameter", step: .01 },
     style: { brush: "pen", color: "#fff", colorMode: "solid", size: 4, opacity: 1, seed: 9 }, ...overrides
-  };
+  });
 }
 function guillocheRosette(overrides = {}) {
-  return {
+  return drawingRecipe({
     kind: "generatedStroke", generator: "guillocheRosette", generatorVersion: 2,
     config: { petals: 8, secondaryFrequency: 13, primaryAmplitude: .08, secondaryAmplitude: .035, baseRadius: .2, rotation: 0, lineCount: 6, lineSpacing: .006, phaseOffset: 0 },
     animation: { amount: .5, speed: .15, targets: { phaseOffset: false, secondaryAmplitude: false, secondaryFrequency: false, rotation: false } },
     domain: { start: 0, end: Math.PI * 2 }, sampling: { mode: "parameter", step: .01 },
     style: { brush: "pen", color: "#fff", colorMode: "solid", size: 4, opacity: 1, seed: 9 }, ...overrides
-  };
+  });
 }
 
 test("spirograph derives independent arm contours and morphs deterministically with time", () => {
@@ -39,8 +40,8 @@ test("spirograph derives independent arm contours and morphs deterministically w
 test("generated closed contours resolve v1 material from local curvature", () => {
   const drawable = spirograph({ style: { brush: "pen", taper: "none", materialVersion: 1, colorMode: "gradient", startColor: "#ff0000", endColor: "#0000ff", size: 4, opacity: .85, seed: 9 } });
   const contours = derivePath(drawable, { width: 200, height: 200, time: 0 }).contours, instructions = [];
-  replayBrushContours(new BrushPainter(item => instructions.push(item)), contours, drawable.style);
-  const energies = contours[0].points.map((_, index) => contourEnergy(contours[0].points, index, drawable.style.size, { closed: true }));
+  replayBrushContours(new BrushPainter(item => instructions.push(item)), contours, drawable.material.options);
+  const energies = contours[0].points.map((_, index) => contourEnergy(contours[0].points, index, drawable.material.options.size, { closed: true }));
   const low = energies.indexOf(Math.min(...energies)), high = energies.indexOf(Math.max(...energies));
   assert.ok(energies[high] > energies[low]);
   assert.notEqual(instructions[low].color, instructions[high].color, "tighter generator turns receive a distinct material tint");

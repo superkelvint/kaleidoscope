@@ -1,10 +1,13 @@
 import { isDrawable } from "./drawable-path.js";
-import { BRUSHES, canReplayBrushPath } from "./brushes.js";
+import { isStrokeMaterial } from "./stroke-material.js";
 
 const clone = value => structuredClone(value);
+const validGesture = gesture => Array.isArray(gesture?.points) && gesture.points.every(point => Number.isFinite(point?.x) && Number.isFinite(point?.y));
+const validGeometry = geometry => typeof geometry?.type === "string" && geometry.type.length > 0;
 const validDrawable = drawable => isDrawable(drawable)
-  && Boolean(BRUSHES[drawable?.style?.brush])
-  && (drawable.kind !== "pathStroke" || canReplayBrushPath(drawable.points, drawable.style));
+  && (drawable.kind === "generatedStroke" || validGeometry(drawable.geometry))
+  && isStrokeMaterial(drawable.material)
+  && (drawable.kind !== "pathStroke" || validGesture(drawable.gesture));
 
 /** Durable semantic truth for a drawing. It intentionally owns no pixels or caches. */
 export class DrawingDocument {
@@ -21,7 +24,7 @@ export class DrawingDocument {
     this.replaceAction = null;
   }
 
-  getContentState() { return clone({ version: 3, backgroundColor: this.backgroundColor, operations: this.operations }); }
+  getContentState() { return clone({ version: 4, backgroundColor: this.backgroundColor, operations: this.operations }); }
   getRenderView() { return { backgroundColor: this.backgroundColor, operations: this.operations.map(clone) }; }
   canUndo() { return Boolean(this.lastUndo); }
   get operationCount() { return this.operations.length; }
@@ -81,9 +84,12 @@ export class DrawingDocument {
     return { type: "background", before, after: color };
   }
   restoreContentState(state) {
-    if (!state || state.version !== 3 || "cursor" in state || typeof state.backgroundColor !== "string" || !Array.isArray(state.operations)) return null;
+    // Schema-v3 recipes remain explicit adapter recipes so their original
+    // reconstruction semantics survive the geometry/material separation.
+    if (!state || ![3, 4].includes(state.version) || "cursor" in state || typeof state.backgroundColor !== "string" || !Array.isArray(state.operations)) return null;
     const ids = new Set(), operations = [];
-    for (const operation of state.operations) {
+    for (const saved of state.operations) {
+      const operation = state.version === 3 ? migrateV3Operation(saved) : saved;
       if (!validOperation(operation) || ids.has(operation.id)) return null;
       ids.add(operation.id); operations.push(clone(operation));
     }
@@ -94,19 +100,31 @@ export class DrawingDocument {
 
 function drawableForOperation(operation) {
   if (!operation) return null;
-  if (operation.type === "PaintOperation") return { kind: "pathStroke", points: operation.points, style: operation.style };
+  if (operation.type === "PaintOperation") return { kind: "pathStroke", gesture: clone(operation.gesture), geometry: clone(operation.geometry), material: clone(operation.material) };
   if (operation.type === "GeneratorOperation") {
-    const { generator, generatorVersion, config, animation, domain, sampling, style } = operation;
-    return { kind: "generatedStroke", generator, generatorVersion, config, animation, domain, sampling, style };
+    const { generator, generatorVersion, config, animation, domain, sampling, material } = operation;
+    return { kind: "generatedStroke", generator, generatorVersion, config, animation, domain, sampling, geometry: { type: "generator" }, material: clone(material) };
   }
   return null;
 }
 function operationForDrawable(id, drawable) {
   return drawable.kind === "pathStroke"
-    ? { id, type: "PaintOperation", points: clone(drawable.points), style: clone(drawable.style) }
-    : { id, type: "GeneratorOperation", generator: drawable.generator, generatorVersion: drawable.generatorVersion, config: clone(drawable.config), animation: clone(drawable.animation), domain: clone(drawable.domain), sampling: clone(drawable.sampling), style: clone(drawable.style) };
+    ? { id, type: "PaintOperation", gesture: clone(drawable.gesture), geometry: clone(drawable.geometry), material: clone(drawable.material) }
+    : { id, type: "GeneratorOperation", generator: drawable.generator, generatorVersion: drawable.generatorVersion, config: clone(drawable.config), animation: clone(drawable.animation), domain: clone(drawable.domain), sampling: clone(drawable.sampling), material: clone(drawable.material) };
 }
 function validOperation(operation) {
   if (typeof operation?.id !== "string" || !operation.id) return false;
   return validDrawable(drawableForOperation(operation));
+}
+
+function migrateV3Operation(operation) {
+  const style = operation?.style;
+  if (!style || typeof style.brush !== "string") return null;
+  const material = { type: "adapter", color: style.color, opacity: style.opacity, width: style.size, options: { ...clone(style), schemaVersion: 3 } };
+  if (operation.type === "PaintOperation") return { id: operation.id, type: operation.type, gesture: { points: clone(operation.points), seed: style.seed }, geometry: { type: style.brush }, material };
+  if (operation.type === "GeneratorOperation") {
+    const { id, type, generator, generatorVersion, config, animation, domain, sampling } = operation;
+    return clone({ id, type, generator, generatorVersion, config, animation, domain, sampling, material });
+  }
+  return null;
 }

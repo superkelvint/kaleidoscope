@@ -21,8 +21,8 @@ test("controller stages preview separately then commits a styled path drawable",
   assert.ok(previews.some(Boolean));
   assert.equal(commits.length, 1);
   assert.equal(commits[0].kind, "pathStroke");
-  assert.equal(commits[0].style.brush, "pen");
-  assert.equal(commits[0].style.materialVersion, 1);
+  assert.equal(commits[0].geometry.type, "freehand");
+  assert.equal(commits[0].material.type, "ink");
 });
 
 test("tool and brush settings are independent", () => {
@@ -42,11 +42,11 @@ test("Wisp forces freehand and stores fixed-rate duplicate samples without norma
   controller.begin(event("down", 40, 40), canvas);
   for (let i = 0; i < 700; i += 1) controller.deposit();
   controller.end(event("up", 40, 40));
-  assert.equal(commits[0].style.version, 2);
-  assert.equal(commits[0].style.wispUnitsPerPixel, 1, "the frozen Wisp recipe persists source units per display pixel");
-  assert.ok(Number.isFinite(commits[0].style.wispCenterX) && Number.isFinite(commits[0].style.wispCenterY), "the frozen Wisp recipe persists the mapped display center");
-  assert.ok(commits[0].points.length > 512, "Wisp's simulation samples are never decimated");
-  assert.deepEqual(commits[0].points[0], commits[0].points[1], "a stationary timer tick is a real sample");
+  assert.equal(commits[0].material.options.version, 2);
+  assert.equal(commits[0].material.options.wispUnitsPerPixel, 1, "the frozen Wisp recipe persists source units per display pixel");
+  assert.ok(Number.isFinite(commits[0].material.options.wispCenterX) && Number.isFinite(commits[0].material.options.wispCenterY), "the frozen Wisp recipe persists the mapped display center");
+  assert.ok(commits[0].gesture.points.length > 512, "Wisp's simulation samples are never decimated");
+  assert.deepEqual(commits[0].gesture.points[0], commits[0].gesture.points[1], "a stationary timer tick is a real sample");
 });
 
 test("Wisp style snapshots persist the v2 artist controls", () => {
@@ -73,7 +73,7 @@ test("Wisp freezes its logical-pixel scale from the gesture mapping", () => {
   controller.begin(event("down", 10, 10), wideCanvas);
   controller.deposit();
   controller.end(event("up", 10, 10));
-  assert.equal(commits[0].style.wispUnitsPerPixel, 2);
+  assert.equal(commits[0].material.options.wispUnitsPerPixel, 2);
 });
 
 test("Wisp pointer moves and pointerup never synthesize off-clock samples", () => {
@@ -90,8 +90,8 @@ test("Wisp pointer moves and pointerup never synthesize off-clock samples", () =
   assert.deepEqual({ x: controller.current.points[0].inputScreenVx, y: controller.current.points[0].inputScreenVy }, { x: 60, y: 30 }, "the durable Wisp sample retains raw display-axis input velocity");
   const lastClockSample = structuredClone(controller.current.points.at(-1));
   controller.end(event("up", 90, 50));
-  assert.equal(commits[0].points.length, 1, "release does not create an off-clock velocity sample");
-  assert.deepEqual(commits[0].points.at(-1), lastClockSample);
+  assert.equal(commits[0].gesture.points.length, 1, "release does not create an off-clock velocity sample");
+  assert.deepEqual(commits[0].gesture.points.at(-1), lastClockSample);
 });
 
 test("Wisp retains the available pre-drag logical pointer delta for its first clock sample", () => {
@@ -103,7 +103,7 @@ test("Wisp retains the available pre-drag logical pointer delta for its first cl
   controller.begin(event("down", 10, 10), canvas);
   controller.deposit();
   controller.end(event("up", 10, 10));
-  assert.deepEqual({ x: commits[0].points[0].inputScreenVx, y: commits[0].points[0].inputScreenVy }, { x: 6, y: 2 });
+  assert.deepEqual({ x: commits[0].gesture.points[0].inputScreenVx, y: commits[0].gesture.points[0].inputScreenVy }, { x: 6, y: 2 });
 });
 
 test("solid style snapshots do not retain gradient endpoint colors", () => {
@@ -144,7 +144,7 @@ test("controller-created Fiber strokes treat negative gravity as zero flow attra
     controller.current.style.seed = 1234;
     controller.end(event("up", 95, 100));
     const context = new FiberContext();
-    renderFiberPath(context, commits[0].points, commits[0].style);
+    renderFiberPath(context, commits[0].gesture.points, commits[0].material.options);
     return context.strokes[0].path.at(-1).y;
   };
   assert.equal(draw(-100), draw(0), "controller snapshots do not reintroduce signed world-Y gravity");
@@ -191,7 +191,7 @@ test("freehand preserves its exact sampled recipe through active completion", ()
   for (let index = 1; index <= 700; index += 1) controller.capture({ x: index - 1, y: 50 }, { x: index, y: 50 }, controller.current);
   assert.ok(controller.current.points.length > 512, "the active paint session never compacts its input prefix");
   controller.end(event("up", 700, 50));
-  assert.ok(updates.at(-1).points.length > 512, "completion commits the exact samples that produced the visible raster");
+  assert.ok(updates.at(-1).gesture.points.length > 512, "completion commits the exact samples that produced the visible raster");
   assert.equal(commits.length, 0, "the active-session path uses its normal completion seam");
 });
 
@@ -202,5 +202,22 @@ test("Ctrl snapping constrains both initial and final freehand samples", () => {
   controller.begin(event("down", 55, 30, { ctrlKey: true }), canvas);
   controller.end(event("up", 65, 70, { ctrlKey: true }));
   assert.equal(commits.length, 1);
-  assert.ok(commits[0].points.length >= 2);
+  assert.ok(commits[0].gesture.points.length >= 2);
+});
+
+test("material selection chooses the same brush for deposition, replay, and restored settings", () => {
+  const controller = new DrawingController({ source: { width: 100, height: 100 } });
+  for (const material of ["spray", "texture", "silk", "ink"]) {
+    controller.setMaterial(material);
+    const style = controller.styleSnapshot(), drawable = controller.drawable([{ x: 1, y: 2 }], style);
+    const expected = ["spray", "texture"].includes(material) ? material : "pen";
+    assert.equal(style.brush, expected);
+    assert.equal(drawable.geometry.options.brush, expected);
+    assert.equal(drawable.material.options.brush, expected);
+    const restored = new DrawingController({ source: {} });
+    restored.restoreState(controller.getState());
+    assert.deepEqual(restored.getState(), controller.getState());
+  }
+  controller.setBrush("wisp");
+  assert.equal(controller.drawable([], controller.styleSnapshot()).geometry.type, "wisp");
 });

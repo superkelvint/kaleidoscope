@@ -119,16 +119,23 @@
           </select>
         </div>
         <div class="row">
-          <label for="drawingBrush">Brush</label>
-          <select id="drawingBrush" class="select">
-            <option value="pen" selected>Pen</option>
+          <label for="drawingGeometry">Geometry</label>
+          <select id="drawingGeometry" class="select">
+            <option value="freehand" selected>Freehand</option>
             <option value="ribbon">Ribbon</option>
             <option value="calligraphy">Calligraphy</option>
-            <option value="spray">Spray</option>
-            <option value="texture">Texture</option>
             <option value="fiber">Fiber</option>
             <option value="hair">Hair</option>
             <option value="wisp">Wisp</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="drawingMaterial">Material</label>
+          <select id="drawingMaterial" class="select">
+            <option value="ink" selected>Ink</option>
+            <option value="silk">Silk</option>
+            <option value="spray">Spray</option>
+            <option value="texture">Texture</option>
           </select>
         </div>
         <div id="drawingColorModeControl" class="row">
@@ -155,6 +162,12 @@
         <div class="row">
           <label for="drawingSize">Size</label>
           <input id="drawingSize" type="range" min="1" max="100" step="1" value="8" />
+        </div>
+        <div id="drawingSilkControls" hidden>
+          <div class="row"><label for="drawingSilkStrands">Strands</label><input id="drawingSilkStrands" type="range" min="1" max="32" step="1" value="10" /></div>
+          <div class="row"><label for="drawingSilkSpread">Spread</label><input id="drawingSilkSpread" type="range" min="0" max="64" step="1" value="16" /></div>
+          <div class="row"><label for="drawingSilkWander">Wander</label><input id="drawingSilkWander" type="range" min="0" max="1" step="0.01" value="0.22" /></div>
+          <div class="row"><label for="drawingSilkGlow">Glow</label><input id="drawingSilkGlow" type="range" min="0" max="1" step="0.01" value="0.18" /></div>
         </div>
         <div class="row">
           <label for="drawingOpacity">Opacity</label>

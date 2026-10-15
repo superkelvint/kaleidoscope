@@ -1,5 +1,41 @@
 # Drawing architecture
 
+## Gesture → geometry → material
+
+Durable drawing recipes use this explicit pipeline:
+
+```text
+Gesture → Geometry transform → StrokeGeometry → Material → BrushPainter → pixels
+```
+
+Schema-v4 paint operations store `gesture`, `geometry`, and `material`.
+`gesture` is only the sampled input plus deterministic metadata such as its
+seed. Geometry and material never mutate it. Generator operations store their
+generator recipe and a material recipe; their geometry is the `generator`
+transform.
+
+`stroke-geometry.js` derives causal, prefix-stable `StrokeFrame` values. It
+supports input-point and fixed-distance sampling. `stroke-material.js` owns
+Ink and Silk and emits only `BrushPainter` instructions. Ink is one plain
+source-over round centerline. Its replay deposits the initial dab and consecutive
+round segments in the same order as live input, including translucent overlaps. Silk retains that exact centerline and adds
+seeded core, secondary, and ghost filaments derived from frame normals and
+absolute arc length; neither the filaments nor bounds are durable. Silk sessions
+keep their seeded simulation across appended input and consume the release tail
+after pointer-up. Reconstruction restores only the tail steps already shown.
+Scratch curves expire by lifespan; emission histories are not retained.
+
+Gradient Pen, Ribbon, Calligraphy, Spray, Texture, Fiber/Hair, and Wisp are intentional
+transitional adapters. Their established algorithms remain in their owning
+brush modules. Wisp retains its asynchronous release tail. The adapter is
+explicit in the material recipe and must not become a source-type branch in
+the renderer.
+
+Schema-v3 documents restore as explicit adapter recipes with their original
+material-version behavior and stable IDs. Saves use schema v4. Earlier document
+versions remain unsupported. Derived canvases,
+paint sessions, material bounds, and generated filament paths are not stored.
+
 The drawing pipeline is deliberately change-driven:
 
 ```text
@@ -55,7 +91,8 @@ normal session completion.
 - Texture readiness invalidates only semantics affected by that resource; broad
   cache clears are an implementation fallback, not a contract.
 - `clear()` discards all operations and the single Undo state.
-- Workspace drawing content is schema v1. Earlier workspace keys are ignored.
+- The workspace drawing wrapper is version 3; wrappers 1 and 2 can restore
+  supported document recipes through the document migration boundary.
 
 ## Performance checks
 
@@ -63,3 +100,8 @@ Static append and preview updates must not replay historical committed artwork.
 Source motion must not reconstruct or relocate the periodic material.
 Static prepared geometry should be derived once per operation ID. The target
 animation invariant is zero static derivations and rasterizations per tick.
+
+Transparent tile caches cannot encode additive blending against a colored
+background. Reconstruction on colored backgrounds replays document order
+directly into the background-filled committed material. Normal immediate
+completion still promotes already-deposited pixels without replay.

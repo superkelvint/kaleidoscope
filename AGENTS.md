@@ -16,6 +16,8 @@ notes and task-specific plans elsewhere.
 | Drawing pointer/tool lifecycle        | `drawing-controller.js`                  |
 | Screen-to-source drawing mapping      | `drawing-mapping.js`                     |
 | Brush mechanics / replay              | `brushes.js`, `brush-painter.js`         |
+| Shared stroke frames                  | `stroke-geometry.js`                    |
+| Ink/Silk materials and sessions        | `stroke-material.js`                    |
 | Wisp                                  | `wisp-brush.js`                          |
 | Fiber/Hair                            | `fiber-brush.js`, then `brushes.js`      |
 | Texture brush assets                  | `brush-textures.js`                      |
@@ -193,7 +195,7 @@ Do not casually change this behavior.
 
 Owns durable semantic truth:
 
-- schema-v3 `PaintOperation` and `GeneratorOperation`
+- schema-v4 `PaintOperation` and `GeneratorOperation`
 - stable IDs
 - background
 - validation
@@ -340,7 +342,7 @@ the local motif contributes additional symmetry.
 Persist:
 
 - renderer state
-- drawing schema-v3 document state
+- drawing schema-v4 document state (schema-v3 recipes restore through explicit adapters)
 - controller settings
 - bitmap source data through `BitmapSource`
 

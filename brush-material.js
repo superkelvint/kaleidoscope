@@ -98,7 +98,7 @@ export function contourProgress(points, index, size) {
   return clamp(distance / Math.max(Number(size) * 24, 1));
 }
 
-/** Resolve paint fields for materialVersion 1 styles. */
+/** Resolve paint fields for transitional brush adapters. */
 export function resolveBrushMaterial(style = {}, { energy = 0, progress = 0, variation = 0, opacityScale = 1, profile = "pen", colorSteps = 0 } = {}) {
   const gradient = style.colorMode === "gradient";
   // Wisp's historic velocity mapping is intentionally energy-only. Other
@@ -115,8 +115,7 @@ export function resolveBrushMaterial(style = {}, { energy = 0, progress = 0, var
     ? interpolateHcl(style.startColor || style.color, style.endColor || style.color, amount)
     : (style.color || "#ffffff");
   // Wisp's original material couples velocity to colour only. Its deposited
-  // alpha is exactly supplied by the simulation caller, including for legacy
-  // strokes with no materialVersion.
+  // alpha is exactly supplied by the simulation caller.
   const dynamicOpacity = gradient && profile !== "texture" && profile !== "wisp" ? 1 + (clamp(energy) - .5) * .12 : 1;
   const composite = profile === "wisp" ? "lighter" : profile === "additive" ? "lighter" : "source-over";
   const depositionAlpha = PROFILE_DEPOSITION_ALPHA[profile] ?? 1;

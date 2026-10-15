@@ -1,8 +1,9 @@
+import { drawingRecipe } from "./drawing-recipe.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DrawingDocument } from "../drawing-document.js";
 
-const drawable = (x = 1) => ({ kind: "pathStroke", points: [{ x, y: 1 }, { x: x + 2, y: 3 }], style: { brush: "pen", color: "#fff", colorMode: "solid", size: 2, opacity: 1, taper: "none", seed: 1 } });
+const drawable = (x = 1) => (drawingRecipe({ kind: "pathStroke", points: [{ x, y: 1 }, { x: x + 2, y: 3 }], style: { brush: "pen", color: "#fff", colorMode: "solid", size: 2, opacity: 1, taper: "none", seed: 1 } }));
 const ids = () => { let n = 0; return () => `op-${++n}`; };
 
 test("only the most recent completed commit is undoable and undo is consumable", () => {
@@ -22,9 +23,9 @@ test("replace actions preserve their initial baseline until ended", () => {
   const id = document.commit(drawable(1)).id;
   assert.equal(document.beginReplaceAction(id), true);
   document.replace(id, drawable(10)); document.replace(id, drawable(20)); document.endReplaceAction();
-  assert.equal(document.getDrawable(id).points[0].x, 20);
+  assert.equal(document.getDrawable(id).gesture.points[0].x, 20);
   document.undo();
-  assert.equal(document.getDrawable(id).points[0].x, 1);
+  assert.equal(document.getDrawable(id).gesture.points[0].x, 1);
 });
 
 test("background changes consume Undo and clear discards it", () => {
@@ -43,13 +44,28 @@ test("background changes consume Undo and clear discards it", () => {
   assert.equal(document.canUndo(), false, "clear also discards a background-only Undo");
 });
 
-test("document persists only schema-v3 typed operations and restores without Undo", () => {
+test("document persists only schema-v4 typed operations and restores without Undo", () => {
   const document = new DrawingDocument({ createId: ids() });
   assert.equal(document.restoreContentState({ version: 1, backgroundColor: "#000", operations: [], cursor: 0 }), null);
   assert.equal(document.restoreContentState({ version: 2, backgroundColor: "#000", operations: [] }), null, "v2 is deliberately not migrated");
-  assert.equal(document.restoreContentState({ version: 3, backgroundColor: "#000", operations: [{ id: "same", type: "PaintOperation", points: drawable().points, style: drawable().style }, { id: "same", type: "PaintOperation", points: drawable(4).points, style: drawable(4).style }] }), null);
-  assert.equal(document.restoreContentState({ version: 3, backgroundColor: "#000", operations: [{ id: "good", type: "PaintOperation", points: drawable().points, style: drawable().style }] }).type, "restore");
+  assert.equal(document.restoreContentState({ version: 4, backgroundColor: "#000", operations: [{ id: "same", type: "PaintOperation", gesture: drawable().gesture, geometry: drawable().geometry, material: drawable().material }, { id: "same", type: "PaintOperation", gesture: drawable(4).gesture, geometry: drawable(4).geometry, material: drawable(4).material }] }), null);
+  assert.equal(document.restoreContentState({ version: 4, backgroundColor: "#000", operations: [{ id: "good", type: "PaintOperation", gesture: drawable().gesture, geometry: drawable().geometry, material: drawable().material }] }).type, "restore");
   assert.deepEqual(Object.keys(document.getContentState()).sort(), ["backgroundColor", "operations", "version"]);
   assert.equal(document.canUndo(), false);
   assert.equal(document.redo, undefined);
+});
+
+test("schema-v3 recipes restore with stable IDs and preserve the legacy brush contract", () => {
+  const document = new DrawingDocument(), points = [{ x: 1, y: 2 }, { x: 10, y: 8 }];
+  const style = { brush: "pen", color: "#fff", size: 4, opacity: .5, materialVersion: 1, seed: 9 };
+  const saved = { version: 3, backgroundColor: "#123456", operations: [{ id: "old-paint", type: "PaintOperation", points, style }] };
+  const original = structuredClone(saved);
+  assert.equal(document.restoreContentState(saved)?.type, "restore");
+  const restored = document.getDrawable("old-paint");
+  assert.deepEqual(restored.gesture, { points, seed: 9 });
+  assert.equal(restored.material.options.schemaVersion, 3);
+  assert.equal(restored.material.options.materialVersion, 1);
+  assert.equal(document.getContentState().version, 4);
+  assert.equal(document.canUndo(), false);
+  assert.deepEqual(saved, original);
 });
